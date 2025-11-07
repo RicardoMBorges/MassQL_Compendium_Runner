@@ -234,10 +234,10 @@ def run_compendiums(
     source_name_map: Dict[str, str] | None = None
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame], pd.DataFrame]:
 
-
-    all_hits = []
+    all_hits: List[pd.DataFrame] = []
 
     for mgf_path in mgf_files:
+        # --- canonical MGF map (scan → precmz/rt) ---------------------------
         mgf_rows = []
         mgf_scans_max = 0
         with _open_mgf(mgf_path) as _rdr_mgf_:
@@ -264,6 +264,7 @@ def run_compendiums(
                     mgf_scans_max = _scan
         mgf_map = pd.DataFrame(mgf_rows).astype({"scan": int})
 
+        # --- optional loader frames + alignment -----------------------------
         ms1_df = ms2_df = None
         if use_loader_frames:
             try:
@@ -274,6 +275,7 @@ def run_compendiums(
             if ms2_df is not None:
                 ms2_df = align_ms2_with_mgf(ms2_df, mgf_path)
 
+        # --- iterate compendiums/queries ------------------------------------
         for comp_file in compendium_files:
             comp_name = Path(comp_file).stem
             try:
@@ -303,76 +305,132 @@ def run_compendiums(
                     st.info(f"[INFO] Query failed ({comp_name} :: {section} #{q_idx}) on {os.path.basename(mgf_path)}: {e}")
                     continue
 
+                # --- normalize schema ---------------------------------------
                 res = res.copy()
+
+                # unify scan column
                 if "scan" not in res.columns and "SCANS" in res.columns:
                     res["scan"] = res["SCANS"]
-                if "scan" in res.columns:
-                    res["scan"] = pd.to_numeric(res["scan"], errors="coerce").astype("Int64")
 
-                res["compendium"]  = comp_name
-                res["section"]     = section
-                res["query_idx"]   = q_idx
+                # ensure key columns exist (fill missing as NA)
+                for col in ("scan", "precmz", "rt", "compendium", "section", "query_idx", "source_file"):
+                    if col not in res.columns:
+                        res[col] = pd.NA
+
+                # annotate meta
+                res["compendium"]  = comp_name if res["compendium"].isna().all() else res["compendium"]
+                res["section"]     = section   if res["section"].isna().all()     else res["section"]
+                res["query_idx"]   = q_idx     if res["query_idx"].isna().all()   else res["query_idx"]
+
+                # display name for the source file
                 disp = source_name_map.get(mgf_path, os.path.basename(mgf_path)) if source_name_map else os.path.basename(mgf_path)
-                res["source_file"] = disp
+                res["source_file"] = disp if res["source_file"].isna().all() else res["source_file"]
 
+                # lift uppercase metrics if present
                 for c in ("precmz", "rt"):
                     if c not in res.columns and c.upper() in res.columns:
                         res[c] = res[c.upper()]
 
+                # coerce types gently
+                if "scan" in res.columns:
+                    res["scan"] = pd.to_numeric(res["scan"], errors="coerce")
+
+                for c in ("precmz", "rt"):
+                    if c in res.columns:
+                        res[c] = pd.to_numeric(res[c], errors="coerce")
+
+                # backfill precmz/rt from canonical MGF
                 if "scan" in res.columns:
                     res = res.merge(mgf_map, on="scan", how="left")
                     if "precmz" in res.columns:
-                        res["precmz"] = pd.to_numeric(res["precmz"], errors="coerce").fillna(res["precmz_mgf"])
+                        res["precmz"] = res["precmz"].fillna(res["precmz_mgf"])
                     else:
                         res["precmz"] = res["precmz_mgf"]
                     if "rt" in res.columns:
-                        res["rt"] = pd.to_numeric(res["rt"], errors="coerce").fillna(res["rt_mgf"])
+                        res["rt"] = res["rt"].fillna(res["rt_mgf"])
                     else:
                         res["rt"] = res["rt_mgf"]
                     res = res.drop(columns=["precmz_mgf", "rt_mgf"])
 
-                sc_col = "scan" if "scan" in res.columns else ("SCANS" if "SCANS" in res.columns else None)
+                # optional diagnostic (no-op)
+                sc_col = "scan" if "scan" in res.columns else None
                 if sc_col is not None:
-                    _res_sc = pd.to_numeric(res[sc_col], errors="coerce").dropna().astype(int)
+                    _res_sc = pd.to_numeric(res[sc_col], errors="coerce").dropna()
                     if not _res_sc.empty and _res_sc.max() < mgf_scans_max:
-                        # just a quiet diagnostic; not an error
                         pass
 
                 all_hits.append(res)
 
+    # --- no hits at all ------------------------------------------------------
     if not all_hits:
         empty = pd.DataFrame(columns=["scan","precmz","rt","compendium","section","query_idx","source_file"])
         return empty, {}, empty
 
+    # --- combine & deduplicate ----------------------------------------------
     combined = pd.concat(all_hits, ignore_index=True)
 
-    combined_unique = (combined
-        .drop_duplicates(subset=["source_file","compendium","section","query_idx","scan"])
+    # keep one row per (file × compendium × section × query × scan)
+    dedup_keys = ["source_file","compendium","section","query_idx","scan"]
+    for k in dedup_keys:
+        if k not in combined.columns:
+            combined[k] = pd.NA
+    combined_unique = (
+        combined
+        .drop_duplicates(subset=dedup_keys)
         .reset_index(drop=True)
     )
 
-    combined_unique["hit"] = 1
-    presence_global = combined_unique.pivot_table(
-        index=["source_file","scan"],
-        columns=["compendium", "section"],
-        values="hit",
-        aggfunc="max",
-        fill_value=0
-    ).sort_index()
+    # --- presence matrices (hardened) ---------------------------------------
+    need_cols = {"source_file", "scan", "compendium", "section"}
+    have_cols = set(combined_unique.columns)
 
-    presence_by_comp = {}
-    for comp in combined_unique["compendium"].unique():
-        sub = combined_unique.loc[combined_unique["compendium"] == comp].copy()
-        pres = sub.pivot_table(
-            index=["source_file","scan"],
-            columns="section",
-            values="hit",
-            aggfunc="max",
-            fill_value=0
-        ).sort_index()
-        presence_by_comp[comp] = pres
+    presence_global = pd.DataFrame()
+    presence_by_comp: Dict[str, pd.DataFrame] = {}
+
+    if need_cols.issubset(have_cols):
+        dfp = combined_unique.copy()
+
+        # dtypes & clean
+        dfp["source_file"] = dfp["source_file"].astype(str)
+        dfp["scan"]        = pd.to_numeric(dfp["scan"], errors="coerce")
+        dfp["compendium"]  = dfp["compendium"].astype(str)
+        dfp["section"]     = dfp["section"].astype(str)
+
+        dfp = dfp.dropna(subset=["source_file", "scan", "compendium", "section"])
+        if not dfp.empty:
+            dfp["hit"] = 1
+
+            # global compendium × section matrix
+            presence_global = (
+                dfp.pivot_table(
+                    index=["source_file","scan"],
+                    columns=["compendium","section"],
+                    values="hit",
+                    aggfunc="max",
+                    fill_value=0
+                )
+                .sort_index()
+            )
+
+            # per-compendium matrices
+            for comp in sorted(dfp["compendium"].unique()):
+                sub = dfp.loc[dfp["compendium"] == comp].copy()
+                if sub.empty:
+                    continue
+                pres = (
+                    sub.pivot_table(
+                        index=["source_file","scan"],
+                        columns="section",
+                        values="hit",
+                        aggfunc="max",
+                        fill_value=0
+                    )
+                    .sort_index()
+                )
+                presence_by_comp[comp] = pres
 
     return combined_unique, presence_by_comp, presence_global
+
 
 # ============================================================
 # Pretty summaries + presence tables
