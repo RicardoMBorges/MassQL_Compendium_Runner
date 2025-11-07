@@ -124,6 +124,67 @@ def align_ms2_with_mgf(ms2_df: pd.DataFrame, mgf_path: str) -> pd.DataFrame:
     merged["rt"]     = pd.to_numeric(merged["rt"], errors="coerce")
     return merged
 
+def _count_mgf_spectra(mgf_path: str) -> int:
+    try:
+        n = 0
+        with _open_mgf(mgf_path) as rdr:
+            for _ in rdr:
+                n += 1
+        return n
+    except Exception as e:
+        st.error(f"[MGF] Could not read MGF: {e}")
+        return -1
+
+
+def diagnostics_check(mgf_path: str, comp_paths: List[str]) -> pd.DataFrame:
+    """Return a small table with: compendium file, bytes, parsed QUERY count, first section names."""
+    rows = []
+
+    # MGF basics
+    if mgf_path and os.path.exists(mgf_path):
+        st.info(f"[Diagnostics] MGF file: **{os.path.basename(mgf_path)}**  |  size: {os.path.getsize(mgf_path):,} bytes")
+        n_spec = _count_mgf_spectra(mgf_path)
+        if n_spec >= 0:
+            st.info(f"[Diagnostics] MGF spectra indexed: **{n_spec}**")
+
+    # Compendiums: parse count
+    for p in comp_paths:
+        try:
+            txt = Path(p).read_text(encoding="utf-8", errors="ignore")
+            qitems = parse_compendium(p)
+            sects = sorted({(qi.get("section") or "UnnamedSection") for qi in qitems})[:5]
+            rows.append({
+                "file": os.path.basename(p),
+                "bytes": len(txt.encode("utf-8")),
+                "queries_parsed": len(qitems),
+                "sections_preview": ", ".join(sects)
+            })
+        except Exception as e:
+            rows.append({
+                "file": os.path.basename(p),
+                "bytes": None,
+                "queries_parsed": 0,
+                "sections_preview": f"[parse error: {e}]"
+            })
+
+    return pd.DataFrame(rows)
+
+
+def smoke_test_massql(mgf_path: str) -> tuple[bool, str]:
+    """
+    Try a very permissive MassQL to see if the engine + file are OK.
+    Adjust the query if your engine expects different syntax.
+    """
+    if not mgf_path or not os.path.exists(mgf_path):
+        return False, "MGF path missing"
+    try:
+        # This should return at least one row if MS/MS scans exist.
+        q = "QUERY scaninfo(MS2DATA)"
+        res = msql_engine.process_query(q, mgf_path, ms1_df=None, ms2_df=None, cache=None, parallel=False)
+        return (not res.empty), f"Rows: {len(res)}"
+    except Exception as e:
+        return False, f"MassQL error: {e}"
+
 
 # ============================================================
 # Load logo
@@ -682,6 +743,7 @@ if "combined" not in state:
     state.presence_global = pd.DataFrame()
     state.mgf_path = None
     state.mgf_index = None
+    state.last_comp_paths = []   # <-- store last compendium list
 
 if run_btn:
     if not up_mgf or not up_comps:
@@ -726,8 +788,23 @@ if run_btn:
         state.presence_global = presence_global
         state.mgf_path = mgf_path
         state.mgf_index = _build_mgf_scan_index(mgf_path)
+        state.last_comp_paths = comp_paths            # <-- save for diagnostics
         st.success("Done.")
 
+        # ---------- DIAGNOSTICS if nothing came back ----------
+        if state.combined is None or state.combined.empty:
+            with st.expander("Diagnostics (why are there no results?)", expanded=True):
+                st.warning("No MassQL hits were returned. Here are some checks:")
+                diag = diagnostics_check(state.mgf_path, state.last_comp_paths)
+                if not diag.empty:
+                    st.markdown(html_table(diag, 200), unsafe_allow_html=True)
+
+                ok, msg = smoke_test_massql(state.mgf_path)
+                if ok:
+                    st.success(f"MassQL smoke test: OK — {msg}")
+                else:
+                    st.error(f"MassQL smoke test failed — {msg}")
+                st.caption("Tip: verify your compendium files contain lines starting with `QUERY`, and that tolerances aren’t too strict.")
 
 # Results area
 combined = state.combined
