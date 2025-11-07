@@ -59,53 +59,89 @@ def _find_scan_col(df: pd.DataFrame) -> str | None:
     return None
 
 def align_ms2_with_mgf(ms2_df: pd.DataFrame, mgf_path: str) -> pd.DataFrame:
+    """Align ms2_df with canonical info from MGF, carrying NAME and SPECTRUMID."""
+    # helper: case-insensitive param getter
+    def _get_ci(d: dict, key: str):
+        if not d:
+            return None
+        k = key.lower()
+        for kk, vv in d.items():
+            try:
+                if str(kk).lower() == k:
+                    return vv
+            except Exception:
+                pass
+        return None
+
+    # Build canonical rows from the MGF
     rows = []
     with _open_mgf(mgf_path) as rdr:
         for mgf_seq, spec in enumerate(rdr, start=1):
             P = spec.get("params", {}) or {}
+
+            # robust scan id
             sraw = P.get("scans")
             try:
                 scan = int(str(sraw).strip()) if sraw is not None else mgf_seq
             except Exception:
                 scan = mgf_seq
+
+            # precursor m/z
             pep = P.get("pepmass")
             pepmz = pep[0] if isinstance(pep, (list, tuple, np.ndarray)) else pep
             try:
                 pepmz = float(pepmz)
             except Exception:
                 pepmz = float("nan")
+
+            # RT
             rt_raw = P.get("rtinseconds", 0.0)
             try:
                 rtsec = float(rt_raw) if rt_raw is not None else 0.0
             except Exception:
                 rtsec = 0.0
-            rows.append({"scan": scan, "precmz": pepmz, "rt": rtsec, "mgf_seq": mgf_seq})
-    pepmass_df = pd.DataFrame(rows).astype({"scan": int})
 
-    ms2_df = ms2_df.copy()
+            # NEW: identifiers
+            nm  = _get_ci(P, "NAME")
+            sid = _get_ci(P, "SPECTRUMID")
+
+            rows.append({
+                "scan": scan,
+                "precmz": pepmz,
+                "rt": rtsec,
+                "mgf_seq": mgf_seq,
+                "NAME": nm,
+                "SPECTRUMID": sid,
+            })
+
+    pepmass_df = pd.DataFrame(rows)
+    if not pepmass_df.empty:
+        pepmass_df["scan"] = pd.to_numeric(pepmass_df["scan"], errors="coerce").astype("Int64")
+
+    # Choose alignment path
     scan_col = _find_scan_col(ms2_df)
-    merged = None
-
     if scan_col is not None:
         ms2_tmp = ms2_df.copy()
-        ms2_tmp["scan_new"] = pd.to_numeric(ms2_tmp[scan_col], errors="coerce")
+        ms2_tmp["scan_new"] = pd.to_numeric(ms2_tmp[scan_col], errors="coerce").astype("Int64")
         ms2_tmp = ms2_tmp.dropna(subset=["scan_new"])
-        if not ms2_tmp.empty:
-            ms2_tmp["scan_new"] = ms2_tmp["scan_new"].astype(int)
-            if "scan" in ms2_tmp.columns:
-                ms2_tmp = ms2_tmp.drop(columns=["scan"])
-            ms2_spec = (ms2_tmp.rename(columns={"scan_new": "scan"})
-                               .drop(columns=["_scan_int"], errors="ignore")
-                               .drop_duplicates(subset=["scan"]))
-            if "scan" in ms2_spec.columns and not ms2_spec.empty:
-                merged = pepmass_df.merge(ms2_spec, on="scan", how="left", suffixes=("", "_ms2"))
-
-    if merged is None:
+        if "scan" in ms2_tmp.columns:
+            ms2_tmp = ms2_tmp.drop(columns=["scan"])
+        ms2_spec = (
+            ms2_tmp.rename(columns={"scan_new": "scan"})
+                   .drop(columns=["_scan_int"], errors="ignore")
+                   .drop_duplicates(subset=["scan"])
+        )
+        merged = pepmass_df.merge(ms2_spec, on="scan", how="left", suffixes=("", "_ms2"))
+    else:
+        # fallback: align by sequential order (mgf_seq)
         ms2_tmp = ms2_df.reset_index(drop=True).assign(_row_ix=lambda d: d.index + 1)
-        ms2_spec = (ms2_tmp.groupby("_row_ix", as_index=False).first()
-                            .rename(columns={"_row_ix": "mgf_seq"}))
+        ms2_spec = (
+            ms2_tmp.groupby("_row_ix", as_index=False).first()
+                   .rename(columns={"_row_ix": "mgf_seq"})
+        )
         merged = pepmass_df.merge(ms2_spec, on="mgf_seq", how="left", suffixes=("", "_ms2"))
 
+    # Backfill numeric columns from potential *_ms2 sources if they exist
     for base in ("precmz", "rt"):
         ms2_col = f"{base}_ms2"
         if base not in merged.columns:
@@ -115,14 +151,19 @@ def align_ms2_with_mgf(ms2_df: pd.DataFrame, mgf_path: str) -> pd.DataFrame:
             merged[ms2_col] = pd.to_numeric(merged[ms2_col], errors="coerce")
             merged[base] = merged[base].fillna(merged[ms2_col])
 
+    # Clean up helper columns
     merged = merged.drop(columns=["mgf_seq", "precmz_ms2", "rt_ms2",
                                   "precmz_x", "precmz_y", "rt_x", "rt_y"],
                          errors="ignore")
 
-    merged["scan"] = pd.to_numeric(merged["scan"], errors="coerce").astype(int)
+    # Final types
+    merged["scan"]   = pd.to_numeric(merged["scan"], errors="coerce").astype("Int64")
     merged["precmz"] = pd.to_numeric(merged["precmz"], errors="coerce")
     merged["rt"]     = pd.to_numeric(merged["rt"], errors="coerce")
+
+    # NAME and SPECTRUMID already came from pepmass_df via the merge above.
     return merged
+
 
 def _count_mgf_spectra(mgf_path: str) -> int:
     try:
@@ -184,6 +225,118 @@ def smoke_test_massql(mgf_path: str) -> tuple[bool, str]:
         return (not res.empty), f"Rows: {len(res)}"
     except Exception as e:
         return False, f"MassQL error: {e}"
+
+# Case-insensitive param getter for MGF 'params' dicts
+def _get_param_ci(params: dict, key: str):
+    if not params:
+        return None
+    key_l = key.lower()
+    for k, v in params.items():
+        try:
+            if str(k).lower() == key_l:
+                return v
+        except Exception:
+            pass
+    return None
+
+def align_ms2_with_mgf(ms2_df: pd.DataFrame, mgf_path: str) -> pd.DataFrame:
+    """
+    Align ms2_df with canonical data extracted from the MGF file.
+    Adds NAME and SPECTRUMID if present in the spectrum parameters.
+    """
+
+    def _get_ci(d: dict, key: str):
+        """Case-insensitive key getter."""
+        if not d:
+            return None
+        key = key.lower()
+        for k, v in d.items():
+            if str(k).lower() == key:
+                return v
+        return None
+
+    # --- Build reference table from MGF -----------------------------------
+    rows = []
+    with _open_mgf(mgf_path) as rdr:
+        for mgf_seq, spec in enumerate(rdr, start=1):
+            P = spec.get("params", {}) or {}
+
+            # Robust scan number
+            sraw = P.get("scans")
+            try:
+                scan = int(str(sraw).strip()) if sraw is not None else mgf_seq
+            except Exception:
+                scan = mgf_seq
+
+            # Precursor m/z
+            pep = P.get("pepmass")
+            pepmz = pep[0] if isinstance(pep, (list, tuple, np.ndarray)) else pep
+            try:
+                pepmz = float(pepmz)
+            except Exception:
+                pepmz = float("nan")
+
+            # Retention time
+            rt_raw = P.get("rtinseconds", 0.0)
+            try:
+                rtsec = float(rt_raw) if rt_raw is not None else 0.0
+            except Exception:
+                rtsec = 0.0
+
+            # NEW: identifiers
+            nm = _get_ci(P, "NAME")
+            sid = _get_ci(P, "SPECTRUMID")
+
+            rows.append({
+                "scan": scan,
+                "precmz": pepmz,
+                "rt": rtsec,
+                "mgf_seq": mgf_seq,
+                "NAME": nm,
+                "SPECTRUMID": sid
+            })
+
+    pepmass_df = pd.DataFrame(rows)
+    if pepmass_df.empty:
+        return ms2_df
+
+    pepmass_df["scan"] = pd.to_numeric(pepmass_df["scan"], errors="coerce").astype("Int64")
+
+    # --- Align ms2_df -----------------------------------------------------
+    scan_col = _find_scan_col(ms2_df)
+    if scan_col is not None:
+        ms2_tmp = ms2_df.copy()
+        ms2_tmp["scan_new"] = pd.to_numeric(ms2_tmp[scan_col], errors="coerce").astype("Int64")
+        ms2_tmp = ms2_tmp.dropna(subset=["scan_new"])
+        if "scan" in ms2_tmp.columns:
+            ms2_tmp = ms2_tmp.drop(columns=["scan"])
+        ms2_spec = (ms2_tmp
+                    .rename(columns={"scan_new": "scan"})
+                    .drop(columns=["_scan_int"], errors="ignore")
+                    .drop_duplicates(subset=["scan"]))
+        merged = pepmass_df.merge(ms2_spec, on="scan", how="left", suffixes=("", "_ms2"))
+    else:
+        # Fallback: match by sequence index
+        ms2_tmp = ms2_df.reset_index(drop=True).assign(_row_ix=lambda d: d.index + 1)
+        ms2_spec = (ms2_tmp.groupby("_row_ix", as_index=False).first()
+                    .rename(columns={"_row_ix": "mgf_seq"}))
+        merged = pepmass_df.merge(ms2_spec, on="mgf_seq", how="left", suffixes=("", "_ms2"))
+
+    # --- Backfill numeric columns if needed -------------------------------
+    for base in ("precmz", "rt"):
+        ms2_col = f"{base}_ms2"
+        if ms2_col in merged.columns:
+            merged[base] = merged[base].fillna(merged[ms2_col])
+    merged = merged.drop(columns=["mgf_seq", "precmz_ms2", "rt_ms2"], errors="ignore")
+
+    # --- Final type coercion ---------------------------------------------
+    merged["scan"] = pd.to_numeric(merged["scan"], errors="coerce").astype("Int64")
+    merged["precmz"] = pd.to_numeric(merged["precmz"], errors="coerce")
+    merged["rt"] = pd.to_numeric(merged["rt"], errors="coerce")
+
+    # NAME and SPECTRUMID columns now come directly from pepmass_df
+    return merged
+
 
 
 # ============================================================
@@ -295,32 +448,59 @@ def run_compendiums(
     source_name_map: Dict[str, str] | None = None
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame], pd.DataFrame]:
 
+    # local helper: case-insensitive fetch from params
+    def _get_ci(d: dict, key: str):
+        if not d:
+            return None
+        k = key.lower()
+        for kk, vv in d.items():
+            try:
+                if str(kk).lower() == k:
+                    return vv
+            except Exception:
+                pass
+        return None
+
     all_hits: List[pd.DataFrame] = []
 
     for mgf_path in mgf_files:
-        # --- canonical MGF map (scan → precmz/rt) ---------------------------
+        # --- canonical MGF map (scan → precmz/rt/NAME/SPECTRUMID) -----------
         mgf_rows = []
         mgf_scans_max = 0
         with _open_mgf(mgf_path) as _rdr_mgf_:
             for _i, _spec in enumerate(_rdr_mgf_, start=1):
                 _P = _spec.get("params", {}) or {}
+
                 _s = _P.get("scans")
                 try:
                     _scan = int(str(_s).strip()) if _s is not None else _i
                 except Exception:
                     _scan = _i
+
                 _pep = _P.get("pepmass")
                 _pepmz = _pep[0] if isinstance(_pep, (list, tuple, np.ndarray)) else _pep
                 try:
                     _pepmz = float(_pepmz)
                 except Exception:
                     _pepmz = float("nan")
+
                 _rt_raw = _P.get("rtinseconds", 0.0)
                 try:
                     _rtsec = float(_rt_raw) if _rt_raw is not None else 0.0
                 except Exception:
                     _rtsec = 0.0
-                mgf_rows.append({"scan": _scan, "precmz_mgf": _pepmz, "rt_mgf": _rtsec})
+
+                # NEW: pull identifiers if present
+                _nm  = _get_ci(_P, "NAME")
+                _sid = _get_ci(_P, "SPECTRUMID")
+
+                mgf_rows.append({
+                    "scan": _scan,
+                    "precmz_mgf": _pepmz,
+                    "rt_mgf": _rtsec,
+                    "NAME": _nm,
+                    "SPECTRUMID": _sid,
+                })
                 if _scan > mgf_scans_max:
                     mgf_scans_max = _scan
         mgf_map = pd.DataFrame(mgf_rows).astype({"scan": int})
@@ -400,9 +580,11 @@ def run_compendiums(
                     if c in res.columns:
                         res[c] = pd.to_numeric(res[c], errors="coerce")
 
-                # backfill precmz/rt from canonical MGF
+                # backfill from canonical MGF (also carries NAME/SPECTRUMID)
                 if "scan" in res.columns:
                     res = res.merge(mgf_map, on="scan", how="left")
+
+                    # precmz / rt backfill
                     if "precmz" in res.columns:
                         res["precmz"] = res["precmz"].fillna(res["precmz_mgf"])
                     else:
@@ -411,7 +593,11 @@ def run_compendiums(
                         res["rt"] = res["rt"].fillna(res["rt_mgf"])
                     else:
                         res["rt"] = res["rt_mgf"]
-                    res = res.drop(columns=["precmz_mgf", "rt_mgf"])
+
+                    # keep identifiers; they arrive from mgf_map as "NAME" / "SPECTRUMID"
+                    # (no suffixes needed because they didn't exist in res earlier)
+                    # just drop the *_mgf helper columns
+                    res = res.drop(columns=["precmz_mgf", "rt_mgf"], errors="ignore")
 
                 # optional diagnostic (no-op)
                 sc_col = "scan" if "scan" in res.columns else None
@@ -424,7 +610,9 @@ def run_compendiums(
 
     # --- no hits at all ------------------------------------------------------
     if not all_hits:
-        empty = pd.DataFrame(columns=["scan","precmz","rt","compendium","section","query_idx","source_file"])
+        empty = pd.DataFrame(columns=[
+            "scan","precmz","rt","compendium","section","query_idx","source_file","NAME","SPECTRUMID"
+        ])
         return empty, {}, empty
 
     # --- combine & deduplicate ----------------------------------------------
@@ -491,6 +679,7 @@ def run_compendiums(
                 presence_by_comp[comp] = pres
 
     return combined_unique, presence_by_comp, presence_global
+
 
 
 # ============================================================
@@ -806,7 +995,9 @@ if run_btn:
                     st.error(f"MassQL smoke test failed — {msg}")
                 st.caption("Tip: verify your compendium files contain lines starting with `QUERY`, and that tolerances aren’t too strict.")
 
+# ============================================================
 # Results area
+# ============================================================
 combined = state.combined
 presence_by_comp = state.presence_by_comp
 presence_global = state.presence_global
@@ -892,14 +1083,18 @@ if not combined.empty:
         else:
             st.warning("MGF index not available to render spectrum.")
 
-        # Per-scan MassQL hits table
+        # Per-scan MassQL hits table (now includes NAME / SPECTRUMID if present)
         st.markdown("**MassQL hits for selected scan**")
         dfscan = combined.copy()
         if "scan" in dfscan.columns:
             dfscan = dfscan[pd.to_numeric(dfscan["scan"], errors="coerce") == int(chosen_scan)]
-            keep = [c for c in ("source_file","scan","precmz","rt","compendium","section","query_idx") if c in dfscan.columns]
+            keep_base = ["source_file","scan","precmz","rt","compendium","section","query_idx"]
+            keep_extra = [c for c in ("NAME","SPECTRUMID") if c in dfscan.columns]
+            keep = [c for c in keep_base + keep_extra if c in dfscan.columns]
             if keep:
-                dfscan = dfscan[keep].drop_duplicates().sort_values(["source_file","compendium","section","query_idx"])
+                dfscan = (dfscan[keep]
+                          .drop_duplicates()
+                          .sort_values(["source_file","compendium","section","query_idx"]))
         st.markdown(html_table(dfscan, 300), unsafe_allow_html=True)
         st.download_button("Download scan_hits.csv",
                            data=download_csv_bytes(dfscan), file_name=f"scan_{chosen_scan}_hits.csv")
@@ -908,3 +1103,4 @@ if not combined.empty:
 
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
