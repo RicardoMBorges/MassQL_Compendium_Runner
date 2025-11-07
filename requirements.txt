@@ -1,0 +1,18 @@
+# Core
+streamlit
+numpy
+pandas
+scipy
+
+# Viz
+plotly
+kaleido
+matplotlib
+Pillow
+
+# Extra viz (optional)
+seaborn
+
+# MassQL
+massql 
+

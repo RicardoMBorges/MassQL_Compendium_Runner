@@ -1,0 +1,27 @@
+#Scan#	pepmass	query_validation
+5876	305.0706	Flavone_MS2
+15493	343.078	Flavone_Glucoside
+18788	330.0936	Flavone_Glucoside
+21968	281.1385	Flavone_Glucoside
+22668	330.0935	Flavone_Glucoside
+23902	330.0935	Flavone_Glucoside
+56759	702.5511	Flavone_Glucoside
+57113	702.5514	Flavone_Glucoside
+5760	268.1042	Flavone_Glucoside
+5876	305.0706	Flavone_Glucoside
+5936	268.1041	Flavone_Glucoside
+6234	268.1042	Flavone_Glucoside
+8537	299.07	Flavone_Glucoside
+5876	305.0706	Flavanone_MS2
+14461	271.1441	Flavanone Glucoside
+14533	271.144	Flavanone Glucoside
+18788	330.0936	Flavanone Glucoside
+22668	330.0935	Flavanone Glucoside
+23902	330.0935	Flavanone Glucoside
+56759	702.5511	Flavanone Glucoside
+57113	702.5514	Flavanone Glucoside
+5876	305.0706	Flavanone Glucoside
+66334	730.5211	Flavanone Glucoside
+6643	373.2448	Flavanone Glucoside
+7589	295.1293	Flavanone Glucoside
+7652	295.1292	Flavanone Glucoside
