@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 import streamlit.components.v1 as components
 
-from pyteomics import mgf
+from pyteomics import mgf, mzml, mzxml
 from massql import msql_engine, msql_fileloading
 
 # ---------- Config: NEVER use pyarrow-backed display ----------
@@ -40,13 +40,120 @@ def download_csv_bytes(df: pd.DataFrame, sep: str = ";") -> bytes:
     return buf.getvalue().encode("utf-8")
 
 # ============================================================
-# Helpers: MGF open + align
+# Helpers: MGF (MGF / mzML / mzXML) open + align
 # ============================================================
-def _open_mgf(path):
+def _open_ms(path: str):
+    """
+    Open MS file (MGF, mzML, mzXML) with pyteomics.
+    """
+    ext = Path(path).suffix.lower()
+    if ext == ".mgf":
+        try:
+            return mgf.MGF(path, use_index=False)
+        except TypeError:
+            return mgf.MGF(path)
+    elif ext == ".mzml":
+        return mzml.MzML(path)
+    elif ext == ".mzxml":
+        return mzxml.MzXML(path)
+    else:
+        # fallback: assume MGF
+        try:
+            return mgf.MGF(path, use_index=False)
+        except TypeError:
+            return mgf.MGF(path)
+
+def _extract_meta_from_spec(spec: dict, seq: int, ext: str):
+    """
+    Return (scan, precursor_mz, rt_seconds) from a spectrum dict
+    for MGF / mzML / mzXML in a best-effort way.
+    """
+    # ---------- MGF ----------
+    if ext == ".mgf":
+        P = spec.get("params", {}) or {}
+
+        # scan
+        sraw = P.get("scans")
+        try:
+            scan = int(str(sraw).strip()) if sraw is not None else seq
+        except Exception:
+            scan = seq
+
+        # precursor
+        pep = P.get("pepmass")
+        pepmz = pep[0] if isinstance(pep, (list, tuple, np.ndarray)) else pep
+        try:
+            pepmz = float(pepmz)
+        except Exception:
+            pepmz = float("nan")
+
+        # RT (in seconds if available, else 0)
+        rt_raw = P.get("rtinseconds", P.get("rt", None))
+        try:
+            rtsec = float(rt_raw) if rt_raw is not None else 0.0
+        except Exception:
+            rtsec = 0.0
+
+        return scan, pepmz, rtsec
+
+    # ---------- mzML / mzXML ----------
+    # scan: prefer 'index' (0-based), else fall back to enumeration
+    scan = spec.get("index")
     try:
-        return mgf.MGF(path, use_index=False)
-    except TypeError:
-        return mgf.MGF(path)
+        scan = int(scan) + 1 if scan is not None else seq
+    except Exception:
+        scan = seq
+
+    pepmz = float("nan")
+    rtsec = 0.0
+
+    # precursor m/z (very rough but robust for typical mzML/mzXML)
+    try:
+        pl = spec.get("precursorList") or spec.get("precursors")
+        precs = None
+        if isinstance(pl, dict):
+            precs = pl.get("precursor")
+        elif isinstance(pl, list):
+            precs = pl
+        if isinstance(precs, list) and precs:
+            p0 = precs[0]
+            sil = p0.get("selectedIonList") or {}
+            ions = sil.get("selectedIon") or []
+            if isinstance(ions, list) and ions:
+                ion0 = ions[0]
+                for key in ("selected ion m/z", "selected_ion_mz", "m/z"):
+                    if key in ion0:
+                        pepmz = float(ion0[key])
+                        break
+    except Exception:
+        pass
+
+    # RT from scanList / cvParam if present (otherwise stays 0.0)
+    try:
+        scan_list = spec.get("scanList", {})
+        scans = scan_list.get("scan")
+        if isinstance(scans, list) and scans:
+            s0 = scans[0]
+            # direct field
+            if "scan start time" in s0:
+                rt_val = s0["scan start time"]
+                rtsec = float(rt_val)
+            # cvParam style
+            elif "cvParam" in s0:
+                for cv in s0["cvParam"]:
+                    name = str(cv.get("name", "")).lower()
+                    if "scan start time" in name:
+                        val = cv.get("value")
+                        unit = str(cv.get("unitName", "")).lower()
+                        if val is not None:
+                            rtsec = float(val)
+                            if "min" in unit:
+                                rtsec *= 60.0
+                        break
+    except Exception:
+        pass
+
+    return scan, pepmz, rtsec
 
 def _find_scan_col(df: pd.DataFrame) -> str | None:
     for cand in ("scan", "SCANS", "Scan", "Scans"):
@@ -58,135 +165,30 @@ def _find_scan_col(df: pd.DataFrame) -> str | None:
             return c
     return None
 
-def align_ms2_with_mgf(ms2_df: pd.DataFrame, mgf_path: str) -> pd.DataFrame:
-    """Align ms2_df with canonical info from MGF, carrying NAME and SPECTRUMID."""
-    # helper: case-insensitive param getter
-    def _get_ci(d: dict, key: str):
-        if not d:
-            return None
-        k = key.lower()
-        for kk, vv in d.items():
-            try:
-                if str(kk).lower() == k:
-                    return vv
-            except Exception:
-                pass
-        return None
-
-    # Build canonical rows from the MGF
-    rows = []
-    with _open_mgf(mgf_path) as rdr:
-        for mgf_seq, spec in enumerate(rdr, start=1):
-            P = spec.get("params", {}) or {}
-
-            # robust scan id
-            sraw = P.get("scans")
-            try:
-                scan = int(str(sraw).strip()) if sraw is not None else mgf_seq
-            except Exception:
-                scan = mgf_seq
-
-            # precursor m/z
-            pep = P.get("pepmass")
-            pepmz = pep[0] if isinstance(pep, (list, tuple, np.ndarray)) else pep
-            try:
-                pepmz = float(pepmz)
-            except Exception:
-                pepmz = float("nan")
-
-            # RT
-            rt_raw = P.get("rtinseconds", 0.0)
-            try:
-                rtsec = float(rt_raw) if rt_raw is not None else 0.0
-            except Exception:
-                rtsec = 0.0
-
-            # NEW: identifiers
-            nm  = _get_ci(P, "NAME")
-            sid = _get_ci(P, "SPECTRUMID")
-
-            rows.append({
-                "scan": scan,
-                "precmz": pepmz,
-                "rt": rtsec,
-                "mgf_seq": mgf_seq,
-                "NAME": nm,
-                "SPECTRUMID": sid,
-            })
-
-    pepmass_df = pd.DataFrame(rows)
-    if not pepmass_df.empty:
-        pepmass_df["scan"] = pd.to_numeric(pepmass_df["scan"], errors="coerce").astype("Int64")
-
-    # Choose alignment path
-    scan_col = _find_scan_col(ms2_df)
-    if scan_col is not None:
-        ms2_tmp = ms2_df.copy()
-        ms2_tmp["scan_new"] = pd.to_numeric(ms2_tmp[scan_col], errors="coerce").astype("Int64")
-        ms2_tmp = ms2_tmp.dropna(subset=["scan_new"])
-        if "scan" in ms2_tmp.columns:
-            ms2_tmp = ms2_tmp.drop(columns=["scan"])
-        ms2_spec = (
-            ms2_tmp.rename(columns={"scan_new": "scan"})
-                   .drop(columns=["_scan_int"], errors="ignore")
-                   .drop_duplicates(subset=["scan"])
-        )
-        merged = pepmass_df.merge(ms2_spec, on="scan", how="left", suffixes=("", "_ms2"))
-    else:
-        # fallback: align by sequential order (mgf_seq)
-        ms2_tmp = ms2_df.reset_index(drop=True).assign(_row_ix=lambda d: d.index + 1)
-        ms2_spec = (
-            ms2_tmp.groupby("_row_ix", as_index=False).first()
-                   .rename(columns={"_row_ix": "mgf_seq"})
-        )
-        merged = pepmass_df.merge(ms2_spec, on="mgf_seq", how="left", suffixes=("", "_ms2"))
-
-    # Backfill numeric columns from potential *_ms2 sources if they exist
-    for base in ("precmz", "rt"):
-        ms2_col = f"{base}_ms2"
-        if base not in merged.columns:
-            merged[base] = merged[ms2_col] if ms2_col in merged.columns else np.nan
-        elif ms2_col in merged.columns:
-            merged[base] = pd.to_numeric(merged[base], errors="coerce")
-            merged[ms2_col] = pd.to_numeric(merged[ms2_col], errors="coerce")
-            merged[base] = merged[base].fillna(merged[ms2_col])
-
-    # Clean up helper columns
-    merged = merged.drop(columns=["mgf_seq", "precmz_ms2", "rt_ms2",
-                                  "precmz_x", "precmz_y", "rt_x", "rt_y"],
-                         errors="ignore")
-
-    # Final types
-    merged["scan"]   = pd.to_numeric(merged["scan"], errors="coerce").astype("Int64")
-    merged["precmz"] = pd.to_numeric(merged["precmz"], errors="coerce")
-    merged["rt"]     = pd.to_numeric(merged["rt"], errors="coerce")
-
-    # NAME and SPECTRUMID already came from pepmass_df via the merge above.
-    return merged
 
 
-def _count_mgf_spectra(mgf_path: str) -> int:
+def _count_ms_spectra(ms_path: str) -> int:
     try:
         n = 0
-        with _open_mgf(mgf_path) as rdr:
+        with _open_ms(ms_path) as rdr:
             for _ in rdr:
                 n += 1
         return n
     except Exception as e:
-        st.error(f"[MGF] Could not read MGF: {e}")
+        st.error(f"[MS] Could not read file: {e}")
         return -1
 
 
-def diagnostics_check(mgf_path: str, comp_paths: List[str]) -> pd.DataFrame:
+def diagnostics_check(ms_path: str, comp_paths: List[str]) -> pd.DataFrame:
     """Return a small table with: compendium file, bytes, parsed QUERY count, first section names."""
     rows = []
 
-    # MGF basics
-    if mgf_path and os.path.exists(mgf_path):
-        st.info(f"[Diagnostics] MGF file: **{os.path.basename(mgf_path)}**  |  size: {os.path.getsize(mgf_path):,} bytes")
-        n_spec = _count_mgf_spectra(mgf_path)
+    # MS basics
+    if ms_path and os.path.exists(ms_path):
+        st.info(f"[Diagnostics] MS file: **{os.path.basename(ms_path)}**  |  size: {os.path.getsize(ms_path):,} bytes")
+        n_spec = _count_ms_spectra(ms_path)
         if n_spec >= 0:
-            st.info(f"[Diagnostics] MGF spectra indexed: **{n_spec}**")
+            st.info(f"[Diagnostics] Spectra indexed: **{n_spec}**")
 
     # Compendiums: parse count
     for p in comp_paths:
@@ -211,38 +213,20 @@ def diagnostics_check(mgf_path: str, comp_paths: List[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def smoke_test_massql(mgf_path: str) -> tuple[bool, str]:
-    """
-    Try a very permissive MassQL to see if the engine + file are OK.
-    Adjust the query if your engine expects different syntax.
-    """
-    if not mgf_path or not os.path.exists(mgf_path):
-        return False, "MGF path missing"
+def smoke_test_massql(ms_path: str) -> tuple[bool, str]:
+    if not ms_path or not os.path.exists(ms_path):
+        return False, "MS path missing"
     try:
-        # This should return at least one row if MS/MS scans exist.
         q = "QUERY scaninfo(MS2DATA)"
-        res = msql_engine.process_query(q, mgf_path, ms1_df=None, ms2_df=None, cache=None, parallel=False)
+        res = msql_engine.process_query(q, ms_path, ms1_df=None, ms2_df=None, cache=None, parallel=False)
         return (not res.empty), f"Rows: {len(res)}"
     except Exception as e:
         return False, f"MassQL error: {e}"
 
-# Case-insensitive param getter for MGF 'params' dicts
-def _get_param_ci(params: dict, key: str):
-    if not params:
-        return None
-    key_l = key.lower()
-    for k, v in params.items():
-        try:
-            if str(k).lower() == key_l:
-                return v
-        except Exception:
-            pass
-    return None
-
-def align_ms2_with_mgf(ms2_df: pd.DataFrame, mgf_path: str) -> pd.DataFrame:
+def align_ms2_with_mgf(ms2_df: pd.DataFrame, ms_path: str) -> pd.DataFrame:
     """
-    Align ms2_df with canonical data extracted from the MGF file.
-    Adds NAME and SPECTRUMID if present in the spectrum parameters.
+    Align ms2_df with canonical data extracted from an MS file (MGF, mzML, mzXML).
+    For MGF, also attaches NAME and SPECTRUMID if present.
     """
 
     def _get_ci(d: dict, key: str):
@@ -251,58 +235,45 @@ def align_ms2_with_mgf(ms2_df: pd.DataFrame, mgf_path: str) -> pd.DataFrame:
             return None
         key = key.lower()
         for k, v in d.items():
-            if str(k).lower() == key:
-                return v
+            try:
+                if str(k).lower() == key:
+                    return v
+            except Exception:
+                pass
         return None
 
-    # --- Build reference table from MGF -----------------------------------
+    ext = Path(ms_path).suffix.lower()
+
+    # --- Build reference table from raw MS file ----------------------------
     rows = []
-    with _open_mgf(mgf_path) as rdr:
-        for mgf_seq, spec in enumerate(rdr, start=1):
-            P = spec.get("params", {}) or {}
+    with _open_ms(ms_path) as rdr:
+        for seq, spec in enumerate(rdr, start=1):
+            scan, pepmz, rtsec = _extract_meta_from_spec(spec, seq, ext)
 
-            # Robust scan number
-            sraw = P.get("scans")
-            try:
-                scan = int(str(sraw).strip()) if sraw is not None else mgf_seq
-            except Exception:
-                scan = mgf_seq
-
-            # Precursor m/z
-            pep = P.get("pepmass")
-            pepmz = pep[0] if isinstance(pep, (list, tuple, np.ndarray)) else pep
-            try:
-                pepmz = float(pepmz)
-            except Exception:
-                pepmz = float("nan")
-
-            # Retention time
-            rt_raw = P.get("rtinseconds", 0.0)
-            try:
-                rtsec = float(rt_raw) if rt_raw is not None else 0.0
-            except Exception:
-                rtsec = 0.0
-
-            # NEW: identifiers
-            nm = _get_ci(P, "NAME")
-            sid = _get_ci(P, "SPECTRUMID")
+            nm = None
+            sid = None
+            if ext == ".mgf":
+                P = spec.get("params", {}) or {}
+                nm  = _get_ci(P, "NAME")
+                sid = _get_ci(P, "SPECTRUMID")
 
             rows.append({
                 "scan": scan,
                 "precmz": pepmz,
                 "rt": rtsec,
-                "mgf_seq": mgf_seq,
+                "seq": seq,
                 "NAME": nm,
                 "SPECTRUMID": sid
             })
 
-    pepmass_df = pd.DataFrame(rows)
-    if pepmass_df.empty:
+    ref = pd.DataFrame(rows)
+    if ref.empty:
         return ms2_df
 
-    pepmass_df["scan"] = pd.to_numeric(pepmass_df["scan"], errors="coerce").astype("Int64")
+    ref["scan"] = pd.to_numeric(ref["scan"], errors="coerce").astype("Int64")
 
-    # --- Align ms2_df -----------------------------------------------------
+    # --- Align ms2_df ------------------------------------------------------
+    ms2_df = ms2_df.copy()
     scan_col = _find_scan_col(ms2_df)
     if scan_col is not None:
         ms2_tmp = ms2_df.copy()
@@ -310,31 +281,39 @@ def align_ms2_with_mgf(ms2_df: pd.DataFrame, mgf_path: str) -> pd.DataFrame:
         ms2_tmp = ms2_tmp.dropna(subset=["scan_new"])
         if "scan" in ms2_tmp.columns:
             ms2_tmp = ms2_tmp.drop(columns=["scan"])
-        ms2_spec = (ms2_tmp
-                    .rename(columns={"scan_new": "scan"})
-                    .drop(columns=["_scan_int"], errors="ignore")
-                    .drop_duplicates(subset=["scan"]))
-        merged = pepmass_df.merge(ms2_spec, on="scan", how="left", suffixes=("", "_ms2"))
+        ms2_spec = (
+            ms2_tmp.rename(columns={"scan_new": "scan"})
+                   .drop(columns=["_scan_int"], errors="ignore")
+                   .drop_duplicates(subset=["scan"])
+        )
+        merged = ref.merge(ms2_spec, on="scan", how="left", suffixes=("", "_ms2"))
     else:
-        # Fallback: match by sequence index
+        # fallback: align by file order (seq)
         ms2_tmp = ms2_df.reset_index(drop=True).assign(_row_ix=lambda d: d.index + 1)
-        ms2_spec = (ms2_tmp.groupby("_row_ix", as_index=False).first()
-                    .rename(columns={"_row_ix": "mgf_seq"}))
-        merged = pepmass_df.merge(ms2_spec, on="mgf_seq", how="left", suffixes=("", "_ms2"))
+        ms2_spec = (
+            ms2_tmp.groupby("_row_ix", as_index=False).first()
+                   .rename(columns={"_row_ix": "seq"})
+        )
+        merged = ref.merge(ms2_spec, on="seq", how="left", suffixes=("", "_ms2"))
 
-    # --- Backfill numeric columns if needed -------------------------------
+    # Backfill numeric columns from potential *_ms2 sources if they exist
     for base in ("precmz", "rt"):
         ms2_col = f"{base}_ms2"
-        if ms2_col in merged.columns:
+        if base not in merged.columns:
+            merged[base] = merged[ms2_col] if ms2_col in merged.columns else np.nan
+        elif ms2_col in merged.columns:
+            merged[base] = pd.to_numeric(merged[base], errors="coerce")
+            merged[ms2_col] = pd.to_numeric(merged[ms2_col], errors="coerce")
             merged[base] = merged[base].fillna(merged[ms2_col])
-    merged = merged.drop(columns=["mgf_seq", "precmz_ms2", "rt_ms2"], errors="ignore")
 
-    # --- Final type coercion ---------------------------------------------
-    merged["scan"] = pd.to_numeric(merged["scan"], errors="coerce").astype("Int64")
+    merged = merged.drop(columns=["seq", "precmz_ms2", "rt_ms2",
+                                  "precmz_x", "precmz_y", "rt_x", "rt_y"],
+                         errors="ignore")
+
+    merged["scan"]   = pd.to_numeric(merged["scan"], errors="coerce").astype("Int64")
     merged["precmz"] = pd.to_numeric(merged["precmz"], errors="coerce")
-    merged["rt"] = pd.to_numeric(merged["rt"], errors="coerce")
+    merged["rt"]     = pd.to_numeric(merged["rt"], errors="coerce")
 
-    # NAME and SPECTRUMID columns now come directly from pepmass_df
     return merged
 
 
@@ -440,7 +419,7 @@ def _select_overrides(qualifier_overrides: Dict[str, Dict[str, float]] | None, c
 # ============================================================
 def run_compendiums(
     compendium_files: List[str],
-    mgf_files: List[str],
+    mgf_files: List[str],   # continua esse nome para não quebrar chamadas
     *,
     use_loader_frames: bool = True,
     parallel: bool = False,
@@ -448,7 +427,6 @@ def run_compendiums(
     source_name_map: Dict[str, str] | None = None
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame], pd.DataFrame]:
 
-    # local helper: case-insensitive fetch from params
     def _get_ci(d: dict, key: str):
         if not d:
             return None
@@ -463,58 +441,52 @@ def run_compendiums(
 
     all_hits: List[pd.DataFrame] = []
 
-    for mgf_path in mgf_files:
-        # --- canonical MGF map (scan → precmz/rt/NAME/SPECTRUMID) -----------
-        mgf_rows = []
-        mgf_scans_max = 0
-        with _open_mgf(mgf_path) as _rdr_mgf_:
-            for _i, _spec in enumerate(_rdr_mgf_, start=1):
-                _P = _spec.get("params", {}) or {}
+    for ms_path in mgf_files:
+        ms_path = os.fspath(ms_path)
+        ext = Path(ms_path).suffix.lower()
 
-                _s = _P.get("scans")
-                try:
-                    _scan = int(str(_s).strip()) if _s is not None else _i
-                except Exception:
-                    _scan = _i
+        # --- canonical map (scan → precmz / rt / NAME / SPECTRUMID) -------
+        ms_rows = []
+        ms_scans_max = 0
+        with _open_ms(ms_path) as _rdr_ms_:
+            for _i, _spec in enumerate(_rdr_ms_, start=1):
+                _scan, _pepmz, _rtsec = _extract_meta_from_spec(_spec, _i, ext)
 
-                _pep = _P.get("pepmass")
-                _pepmz = _pep[0] if isinstance(_pep, (list, tuple, np.ndarray)) else _pep
-                try:
-                    _pepmz = float(_pepmz)
-                except Exception:
-                    _pepmz = float("nan")
+                _nm = None
+                _sid = None
+                if ext == ".mgf":
+                    P = _spec.get("params", {}) or {}
+                    _nm  = _get_ci(P, "NAME")
+                    _sid = _get_ci(P, "SPECTRUMID")
 
-                _rt_raw = _P.get("rtinseconds", 0.0)
-                try:
-                    _rtsec = float(_rt_raw) if _rt_raw is not None else 0.0
-                except Exception:
-                    _rtsec = 0.0
-
-                # NEW: pull identifiers if present
-                _nm  = _get_ci(_P, "NAME")
-                _sid = _get_ci(_P, "SPECTRUMID")
-
-                mgf_rows.append({
+                ms_rows.append({
                     "scan": _scan,
                     "precmz_mgf": _pepmz,
                     "rt_mgf": _rtsec,
                     "NAME": _nm,
                     "SPECTRUMID": _sid,
                 })
-                if _scan > mgf_scans_max:
-                    mgf_scans_max = _scan
-        mgf_map = pd.DataFrame(mgf_rows).astype({"scan": int})
+                try:
+                    _scan_int = int(_scan)
+                except Exception:
+                    _scan_int = _i
+                if _scan_int > ms_scans_max:
+                    ms_scans_max = _scan_int
+
+        ms_map = pd.DataFrame(ms_rows)
+        if not ms_map.empty:
+            ms_map["scan"] = pd.to_numeric(ms_map["scan"], errors="coerce").astype("Int64")
 
         # --- optional loader frames + alignment -----------------------------
         ms1_df = ms2_df = None
         if use_loader_frames:
             try:
-                ms1_df, ms2_df = msql_fileloading.load_data(mgf_path)
+                ms1_df, ms2_df = msql_fileloading.load_data(ms_path)
             except Exception as e:
-                st.warning(f"[WARN] load_data failed for {os.path.basename(mgf_path)}: {e}")
+                st.warning(f"[WARN] load_data failed for {os.path.basename(ms_path)}: {e}")
                 ms1_df, ms2_df = None, None
             if ms2_df is not None:
-                ms2_df = align_ms2_with_mgf(ms2_df, mgf_path)
+                ms2_df = align_ms2_with_mgf(ms2_df, ms_path)
 
         # --- iterate compendiums/queries ------------------------------------
         for comp_file in compendium_files:
@@ -536,43 +508,50 @@ def run_compendiums(
                 try:
                     res = msql_engine.process_query(
                         qtext,
-                        mgf_path,
+                        ms_path,
                         ms1_df=ms1_df,
                         ms2_df=ms2_df,
                         cache=None,
                         parallel=parallel
                     )
                 except Exception as e:
-                    st.info(f"[INFO] Query failed ({comp_name} :: {section} #{q_idx}) on {os.path.basename(mgf_path)}: {e}")
+                    st.info(f"[INFO] Query failed ({comp_name} :: {section} #{q_idx}) on {os.path.basename(ms_path)}: {e}")
+                    continue
+
+                if res is None or len(res) == 0:
                     continue
 
                 # --- normalize schema ---------------------------------------
                 res = res.copy()
 
                 # unify scan column
-                if "scan" not in res.columns and "SCANS" in res.columns:
-                    res["scan"] = res["SCANS"]
+                scan_variants = [c for c in res.columns if str(c).lower() in ("scan", "scans")]
+                if scan_variants:
+                    src = scan_variants[0]
+                    res["scan"] = res[src]
+                elif "spectrumindex" in (c.lower() for c in res.columns):
+                    true_col = [c for c in res.columns if c.lower() == "spectrumindex"][0]
+                    res["scan"] = pd.to_numeric(res[true_col], errors="coerce").add(1)
+                elif "spectrum_id" in (c.lower() for c in res.columns):
+                    true_col = [c for c in res.columns if c.lower() == "spectrum_id"][0]
+                    res["scan"] = pd.to_numeric(res[true_col], errors="coerce")
 
-                # ensure key columns exist (fill missing as NA)
-                for col in ("scan", "precmz", "rt", "compendium", "section", "query_idx", "source_file"):
+                for col in ("precmz", "rt", "compendium", "section", "query_idx", "source_file"):
                     if col not in res.columns:
                         res[col] = pd.NA
 
-                # annotate meta
                 res["compendium"]  = comp_name if res["compendium"].isna().all() else res["compendium"]
                 res["section"]     = section   if res["section"].isna().all()     else res["section"]
                 res["query_idx"]   = q_idx     if res["query_idx"].isna().all()   else res["query_idx"]
 
-                # display name for the source file
-                disp = source_name_map.get(mgf_path, os.path.basename(mgf_path)) if source_name_map else os.path.basename(mgf_path)
+                disp = source_name_map.get(ms_path, os.path.basename(ms_path)) if source_name_map else os.path.basename(ms_path)
                 res["source_file"] = disp if res["source_file"].isna().all() else res["source_file"]
 
-                # lift uppercase metrics if present
+                # uppercase fallbacks
                 for c in ("precmz", "rt"):
                     if c not in res.columns and c.upper() in res.columns:
                         res[c] = res[c.upper()]
 
-                # coerce types gently
                 if "scan" in res.columns:
                     res["scan"] = pd.to_numeric(res["scan"], errors="coerce")
 
@@ -580,45 +559,39 @@ def run_compendiums(
                     if c in res.columns:
                         res[c] = pd.to_numeric(res[c], errors="coerce")
 
-                # backfill from canonical MGF (also carries NAME/SPECTRUMID)
-                if "scan" in res.columns:
-                    res = res.merge(mgf_map, on="scan", how="left")
+                # --- backfill from canonical map ----------------------------
+                if "scan" in res.columns and not ms_map.empty:
+                    res = res.merge(ms_map, on="scan", how="left")
 
-                    # precmz / rt backfill
                     if "precmz" in res.columns:
                         res["precmz"] = res["precmz"].fillna(res["precmz_mgf"])
                     else:
                         res["precmz"] = res["precmz_mgf"]
+
                     if "rt" in res.columns:
                         res["rt"] = res["rt"].fillna(res["rt_mgf"])
                     else:
                         res["rt"] = res["rt_mgf"]
 
-                    # keep identifiers; they arrive from mgf_map as "NAME" / "SPECTRUMID"
-                    # (no suffixes needed because they didn't exist in res earlier)
-                    # just drop the *_mgf helper columns
                     res = res.drop(columns=["precmz_mgf", "rt_mgf"], errors="ignore")
 
-                # optional diagnostic (no-op)
+                # optional diagnostic
                 sc_col = "scan" if "scan" in res.columns else None
                 if sc_col is not None:
                     _res_sc = pd.to_numeric(res[sc_col], errors="coerce").dropna()
-                    if not _res_sc.empty and _res_sc.max() < mgf_scans_max:
+                    if not _res_sc.empty and ms_scans_max > 0 and _res_sc.max() < ms_scans_max:
                         pass
 
                 all_hits.append(res)
 
-    # --- no hits at all ------------------------------------------------------
     if not all_hits:
         empty = pd.DataFrame(columns=[
             "scan","precmz","rt","compendium","section","query_idx","source_file","NAME","SPECTRUMID"
         ])
         return empty, {}, empty
 
-    # --- combine & deduplicate ----------------------------------------------
     combined = pd.concat(all_hits, ignore_index=True)
 
-    # keep one row per (file × compendium × section × query × scan)
     dedup_keys = ["source_file","compendium","section","query_idx","scan"]
     for k in dedup_keys:
         if k not in combined.columns:
@@ -629,27 +602,23 @@ def run_compendiums(
         .reset_index(drop=True)
     )
 
-    # --- presence matrices (hardened) ---------------------------------------
-    need_cols = {"source_file", "scan", "compendium", "section"}
-    have_cols = set(combined_unique.columns)
-
     presence_global = pd.DataFrame()
     presence_by_comp: Dict[str, pd.DataFrame] = {}
 
+    need_cols = {"source_file", "scan", "compendium", "section"}
+    have_cols = set(combined_unique.columns)
+
     if need_cols.issubset(have_cols):
         dfp = combined_unique.copy()
-
-        # dtypes & clean
         dfp["source_file"] = dfp["source_file"].astype(str)
         dfp["scan"]        = pd.to_numeric(dfp["scan"], errors="coerce")
         dfp["compendium"]  = dfp["compendium"].astype(str)
         dfp["section"]     = dfp["section"].astype(str)
+        dfp = dfp.dropna(subset=["source_file","scan","compendium","section"])
 
-        dfp = dfp.dropna(subset=["source_file", "scan", "compendium", "section"])
         if not dfp.empty:
             dfp["hit"] = 1
 
-            # global compendium × section matrix
             presence_global = (
                 dfp.pivot_table(
                     index=["source_file","scan"],
@@ -661,7 +630,6 @@ def run_compendiums(
                 .sort_index()
             )
 
-            # per-compendium matrices
             for comp in sorted(dfp["compendium"].unique()):
                 sub = dfp.loc[dfp["compendium"] == comp].copy()
                 if sub.empty:
@@ -679,7 +647,6 @@ def run_compendiums(
                 presence_by_comp[comp] = pres
 
     return combined_unique, presence_by_comp, presence_global
-
 
 
 # ============================================================
@@ -770,43 +737,45 @@ def coverage_by_compendium(combined_unique: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 # MGF index + interactive MS/MS via mpld3
 # ============================================================
-def _build_mgf_scan_index(mgf_path: str):
-    """Index MGF by scan -> {mz: np.ndarray, i: np.ndarray, params: dict} (robust to empty arrays)."""
+def _build_ms_scan_index(ms_path: str):
+    """Index MS file by scan -> {mz: np.ndarray, i: np.ndarray, params: dict} for MGF/mzML/mzXML."""
     idx = {}
-    with _open_mgf(mgf_path) as rdr:
+    ext = Path(ms_path).suffix.lower()
+
+    with _open_ms(ms_path) as rdr:
         for seq, spec in enumerate(rdr, start=1):
-            P = spec.get("params", {}) or {}
+            scan, pepmz, rtsec = _extract_meta_from_spec(spec, seq, ext)
 
-            # robust scan id
-            sraw = P.get("scans")
+            if ext == ".mgf":
+                P = spec.get("params", {}) or {}
+                params = {
+                    "pepmass": P.get("pepmass"),
+                    "rtinseconds": P.get("rtinseconds"),
+                    "scans": P.get("scans"),
+                }
+                mz = spec.get("m/z array") or spec.get("m/z") or []
+                I  = spec.get("intensity array") or spec.get("intensity") or []
+            else:
+                P = {}
+                params = {
+                    "pepmass": [pepmz] if pepmz is not None and not (isinstance(pepmz,float) and math.isnan(pepmz)) else None,
+                    "rtinseconds": rtsec,
+                    "id": spec.get("id"),
+                }
+                mz = spec.get("m/z array", [])
+                I  = spec.get("intensity array", [])
+
+            mz = np.asarray(mz, dtype=float) if mz is not None else np.array([], dtype=float)
+            I  = np.asarray(I,  dtype=float) if I  is not None else np.array([], dtype=float)
+
             try:
-                scan = int(str(sraw).strip()) if sraw is not None else seq
+                scan_int = int(scan)
             except Exception:
-                scan = seq
+                scan_int = seq
 
-            # NEVER use `or` with numpy arrays; fetch explicitly
-            mz = spec.get("m/z array", None)
-            if mz is None:
-                mz = spec.get("m/z", None)
+            idx[scan_int] = {"mz": mz, "i": I, "params": params}
 
-            I = spec.get("intensity array", None)
-            if I is None:
-                I = spec.get("intensity", None)
-
-            # Coerce to numpy arrays safely (empty if missing)
-            if mz is None:
-                mz = np.array([], dtype=float)
-            else:
-                mz = np.asarray(mz, dtype=float)
-
-            if I is None:
-                I = np.array([], dtype=float)
-            else:
-                I = np.asarray(I, dtype=float)
-
-            idx[int(scan)] = {"mz": mz, "i": I, "params": P}
     return idx
-
 
 def _plot_ms2_html_from_index(_MGF: dict, scan:int, normalize:bool=True, annotate_top_n:int=12) -> str:
     try:
@@ -870,11 +839,11 @@ def _plot_ms2_html_from_index(_MGF: dict, scan:int, normalize:bool=True, annotat
 # Streamlit UI
 # ============================================================
 st.title("MassQL Compendium Runner + MS/MS Viewer")
-st.caption("Upload an MGF and one or more MassQL compendium .txt files. Tables render via HTML (no pyarrow).")
+st.caption("Upload an MS file (.mgf, .mzML, .mzXML) and one or more MassQL compendium .txt files. Tables render via HTML (no pyarrow).")
 
 with st.sidebar:
     st.header("1) Inputs")
-    up_mgf = st.file_uploader("MGF file", type=["mgf"])
+    up_mgf = st.file_uploader("MS file (.mgf / .mzML / .mzXML)", type=["mgf", "mzml", "mzxml"])
     up_comps = st.file_uploader("Compendium .txt files (multiple)", type=["txt"], accept_multiple_files=True)
 
     st.header("2) Qualifier overrides (applied to all)")
@@ -976,7 +945,7 @@ if run_btn:
         state.presence_by_comp = presence_by_comp
         state.presence_global = presence_global
         state.mgf_path = mgf_path
-        state.mgf_index = _build_mgf_scan_index(mgf_path)
+        state.mgf_index = _build_ms_scan_index(mgf_path)
         state.last_comp_paths = comp_paths            # <-- save for diagnostics
         st.success("Done.")
 
