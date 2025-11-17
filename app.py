@@ -1,7 +1,7 @@
 # app.py — MassQL Compendium Runner + MS/MS Viewer (Streamlit)
 # -----------------------------------------------------------
 # ✅ No pyarrow usage anywhere
-# ✅ Upload a .mgf and multiple compendium .txt files
+# ✅ Upload a .mgf (.mzXML or .mzML) and multiple compendium .txt files
 # ✅ Qualifier overrides (global or per-compendium name)
 # ✅ Interactive MS/MS (zoom/hover via mpld3 inside Streamlit)
 # ✅ Presence tables + named tables + CSV downloads (no Arrow)
@@ -843,7 +843,11 @@ st.caption("Upload an MS file (.mgf, .mzML, .mzXML) and one or more MassQL compe
 
 with st.sidebar:
     st.header("1) Inputs")
-    up_mgf = st.file_uploader("MS file (.mgf / .mzML / .mzXML)", type=["mgf", "mzml", "mzxml"])
+    up_ms_files = st.file_uploader(
+    "MS files (.mgf / .mzML / .mzXML)",
+    type=["mgf", "mzml", "mzxml"],
+    accept_multiple_files=True
+)
     up_comps = st.file_uploader("Compendium .txt files (multiple)", type=["txt"], accept_multiple_files=True)
 
     st.header("2) Qualifier overrides (applied to all)")
@@ -899,20 +903,29 @@ if "combined" not in state:
     state.combined = pd.DataFrame()
     state.presence_by_comp = {}
     state.presence_global = pd.DataFrame()
-    state.mgf_path = None
-    state.mgf_index = None
-    state.last_comp_paths = []   # <-- store last compendium list
+    state.ms_paths = []          # list of all MS file paths on disk
+    state.ms_indexes = {}        # dict[path] -> scan index from _build_ms_scan_index
+    state.source_name_map = {}   # dict[path] -> display name
+    state.last_comp_paths = []   # compendium file paths
+
 
 if run_btn:
-    if not up_mgf or not up_comps:
-        st.error("Please upload an MGF and at least one compendium .txt.")
+    if not up_ms_files or not up_comps:
+        st.error("Please upload at least one MS file and one compendium .txt.")
     else:
-        # Persist uploads (NOTE: no 'suffix' arg)
-        mgf_path, mgf_display = _persist_upload(up_mgf)
+        # Persist MS uploads
+        ms_paths, ms_displays = [], []
+        for f in up_ms_files:
+            p, n = _persist_upload(f)
+            ms_paths.append(p)
+            ms_displays.append(n)
+
+        # Persist compendiums
         comp_paths, comp_names = [], []
         for f in up_comps:
             p, n = _persist_upload(f)
-            comp_paths.append(p); comp_names.append(n)
+            comp_paths.append(p)
+            comp_names.append(n)
 
         # Build overrides
         overrides = {"*": {"TOLERANCEMZ": float(tol_mz), "INTENSITYPERCENT": int(inten_pct)}}
@@ -930,39 +943,51 @@ if run_btn:
             except Exception as e:
                 st.warning(f"Invalid JSON for per-compendium overrides: {e}")
 
+        # Map: full path -> human display name
+        source_name_map = {p: (d or os.path.basename(p)) for p, d in zip(ms_paths, ms_displays)}
+
         with st.spinner("Running MassQL queries..."):
             combined, presence_by_comp, presence_global = run_compendiums(
                 compendium_files=comp_paths,
-                mgf_files=[mgf_path],
+                mgf_files=ms_paths,          # <<< ALL MS FILES HERE
                 use_loader_frames=True,
                 parallel=False,
                 qualifier_overrides=overrides,
-                # Build the map inline to avoid NameError
-                source_name_map={mgf_path: (mgf_display or os.path.basename(mgf_path))}
+                source_name_map=source_name_map
             )
 
+        # Build one scan index per MS file for the viewer
+        ms_indexes = {p: _build_ms_scan_index(p) for p in ms_paths}
+
+        # Save in state
         state.combined = combined
         state.presence_by_comp = presence_by_comp
         state.presence_global = presence_global
-        state.mgf_path = mgf_path
-        state.mgf_index = _build_ms_scan_index(mgf_path)
-        state.last_comp_paths = comp_paths            # <-- save for diagnostics
+        state.ms_paths = ms_paths
+        state.ms_indexes = ms_indexes
+        state.source_name_map = source_name_map
+        state.last_comp_paths = comp_paths
+
         st.success("Done.")
 
         # ---------- DIAGNOSTICS if nothing came back ----------
         if state.combined is None or state.combined.empty:
             with st.expander("Diagnostics (why are there no results?)", expanded=True):
                 st.warning("No MassQL hits were returned. Here are some checks:")
-                diag = diagnostics_check(state.mgf_path, state.last_comp_paths)
+                # just run diagnostics on the first MS file for now
+                first_ms = state.ms_paths[0] if state.ms_paths else None
+                diag = diagnostics_check(first_ms, state.last_comp_paths) if first_ms else pd.DataFrame()
                 if not diag.empty:
                     st.markdown(html_table(diag, 200), unsafe_allow_html=True)
 
-                ok, msg = smoke_test_massql(state.mgf_path)
-                if ok:
-                    st.success(f"MassQL smoke test: OK — {msg}")
-                else:
-                    st.error(f"MassQL smoke test failed — {msg}")
+                if first_ms:
+                    ok, msg = smoke_test_massql(first_ms)
+                    if ok:
+                        st.success(f"MassQL smoke test: OK — {msg}")
+                    else:
+                        st.error(f"MassQL smoke test failed — {msg}")
                 st.caption("Tip: verify your compendium files contain lines starting with `QUERY`, and that tolerances aren’t too strict.")
+
 
 # ============================================================
 # Results area
@@ -970,8 +995,8 @@ if run_btn:
 combined = state.combined
 presence_by_comp = state.presence_by_comp
 presence_global = state.presence_global
-mgf_index = state.mgf_index
-mgf_path = state.mgf_path
+ms_indexes = getattr(state, "ms_indexes", {})
+source_name_map = getattr(state, "source_name_map", {})
 
 if not combined.empty:
     st.subheader("Summary")
@@ -1030,46 +1055,67 @@ if not combined.empty:
     st.markdown("---")
     st.subheader("Interactive MS/MS viewer (mpld3)")
 
-    # Scan options: prefer scans that had hits; fallback to all indexed scans
-    if "scan" in combined.columns:
-        scans = sorted(map(int, pd.to_numeric(combined["scan"], errors="coerce").dropna().unique()))
+    # 1) Choose which MS file (by display name = source_file)
+    # combined["source_file"] already stores display names from source_name_map
+    sources = sorted(combined["source_file"].astype(str).unique())
+    if not sources:
+        st.info("No sources available for MS/MS viewer.")
     else:
-        scans = []
-    if not scans and mgf_index:
-        scans = sorted(mgf_index.keys())
+        col_src, col_opts = st.columns([2, 3])
+        with col_src:
+            chosen_source = st.selectbox("Source file", sources, index=0)
 
-    if scans:
-        colL, colR = st.columns([2, 1])
-        with colL:
-            chosen_scan = st.selectbox("Scan", scans, index=0)
-        with colR:
-            normalize = st.checkbox("Normalize to 100%", value=True)
-            topn = st.slider("Annotate top-N peaks", min_value=0, max_value=40, value=12, step=1)
+        # map display name -> real path
+        name_to_path = {v: k for k, v in source_name_map.items()}
+        ms_path = name_to_path.get(chosen_source)
+        mgf_index = ms_indexes.get(ms_path, {}) if ms_path else {}
 
-        if mgf_index:
-            html = _plot_ms2_html_from_index(mgf_index, int(chosen_scan), normalize=normalize, annotate_top_n=topn)
-            components.html(html, height=420, scrolling=True)
+        # 2) Scans: prefer those with MassQL hits for this source
+        df_src = combined[combined["source_file"] == chosen_source].copy()
+        if "scan" in df_src.columns:
+            scans = sorted(
+                map(int, pd.to_numeric(df_src["scan"], errors="coerce").dropna().unique())
+            )
         else:
-            st.warning("MGF index not available to render spectrum.")
+            scans = []
 
-        # Per-scan MassQL hits table (now includes NAME / SPECTRUMID if present)
-        st.markdown("**MassQL hits for selected scan**")
-        dfscan = combined.copy()
-        if "scan" in dfscan.columns:
-            dfscan = dfscan[pd.to_numeric(dfscan["scan"], errors="coerce") == int(chosen_scan)]
-            keep_base = ["source_file","scan","precmz","rt","compendium","section","query_idx"]
-            keep_extra = [c for c in ("NAME","SPECTRUMID") if c in dfscan.columns]
-            keep = [c for c in keep_base + keep_extra if c in dfscan.columns]
-            if keep:
-                dfscan = (dfscan[keep]
-                          .drop_duplicates()
-                          .sort_values(["source_file","compendium","section","query_idx"]))
-        st.markdown(html_table(dfscan, 300), unsafe_allow_html=True)
-        st.download_button("Download scan_hits.csv",
-                           data=download_csv_bytes(dfscan), file_name=f"scan_{chosen_scan}_hits.csv")
-    else:
-        st.info("No scans available to display.")
+        # Fallback: if no hit scans, use all scans from that file index
+        if not scans and mgf_index:
+            scans = sorted(mgf_index.keys())
 
+        if scans:
+            with col_opts:
+                chosen_scan = st.selectbox("Scan", scans, index=0)
+                normalize = st.checkbox("Normalize to 100%", value=True)
+                topn = st.slider("Annotate top-N peaks", min_value=0, max_value=40, value=12, step=1)
+
+            if mgf_index:
+                html = _plot_ms2_html_from_index(mgf_index, int(chosen_scan),
+                                                 normalize=normalize, annotate_top_n=topn)
+                components.html(html, height=420, scrolling=True)
+            else:
+                st.warning("MS index not available to render spectrum for this file.")
+
+            # Per-scan MassQL hits table, filtered by BOTH source_file and scan
+            st.markdown("**MassQL hits for selected scan**")
+            dfscan = df_src.copy()
+            if "scan" in dfscan.columns:
+                dfscan = dfscan[pd.to_numeric(dfscan["scan"], errors="coerce") == int(chosen_scan)]
+                keep_base = ["source_file","scan","precmz","rt","compendium","section","query_idx"]
+                keep_extra = [c for c in ("NAME","SPECTRUMID") if c in dfscan.columns]
+                keep = [c for c in keep_base + keep_extra if c in dfscan.columns]
+                if keep:
+                    dfscan = (dfscan[keep]
+                              .drop_duplicates()
+                              .sort_values(["source_file","compendium","section","query_idx"]))
+            st.markdown(html_table(dfscan, 300), unsafe_allow_html=True)
+            st.download_button(
+                "Download scan_hits.csv",
+                data=download_csv_bytes(dfscan),
+                file_name=f"{_safe_col(chosen_source)}_scan_{chosen_scan}_hits.csv"
+            )
+        else:
+            st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
 
