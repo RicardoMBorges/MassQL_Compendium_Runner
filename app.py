@@ -256,6 +256,13 @@ def align_ms2_with_mgf(ms2_df: pd.DataFrame, ms_path: str) -> pd.DataFrame:
                 P = spec.get("params", {}) or {}
                 nm  = _get_ci(P, "NAME")
                 sid = _get_ci(P, "SPECTRUMID")
+                # se em algum momento você for usar arrays, use o mesmo padrão:
+                # mz = spec.get("m/z array")
+                # if mz is None:
+                #     mz = spec.get("m/z")
+                # if mz is None:
+                #     mz = []
+
 
             rows.append({
                 "scan": scan,
@@ -753,8 +760,19 @@ def _build_ms_scan_index(ms_path: str):
                     "rtinseconds": P.get("rtinseconds"),
                     "scans": P.get("scans"),
                 }
-                mz = spec.get("m/z array") or spec.get("m/z") or []
-                I  = spec.get("intensity array") or spec.get("intensity") or []
+            
+                mz = spec.get("m/z array")
+                if mz is None:
+                    mz = spec.get("m/z")
+                if mz is None:
+                    mz = []
+            
+                I = spec.get("intensity array")
+                if I is None:
+                    I = spec.get("intensity")
+                if I is None:
+                    I = []
+
             else:
                 P = {}
                 params = {
@@ -1118,4 +1136,5 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
