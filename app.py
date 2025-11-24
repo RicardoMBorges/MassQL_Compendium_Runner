@@ -20,6 +20,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from pyteomics import mgf, mzml, mzxml
+import pymzml
 from massql import msql_engine, msql_fileloading
 
 # ---------- Config: NEVER use pyarrow-backed display ----------
@@ -325,6 +326,71 @@ def align_ms2_with_mgf(ms2_df: pd.DataFrame, ms_path: str) -> pd.DataFrame:
 
     return merged
 
+# ============================================================
+# Helper: convert MS1-only MGF → mzML for MassQL MS1 queries
+# ============================================================
+# ============================================================
+# Helper: convert MS1-only MGF → mzML for MassQL MS1 queries
+# ============================================================
+def convert_ms1_mgf_to_mzml(mgf_path: str) -> str:
+    """
+    Convert an MS1-only MGF file to a simple mzML with one MS1 spectrum per
+    MGF entry, so MassQL can query MS1DATA / MS1MZ.
+
+    Returns the path to the created .mzML file.
+    If the MGF has no spectra, returns the original mgf_path.
+    """
+    # Read spectra using the same helper used everywhere else
+    spectra = []
+    try:
+        with _open_mgf(mgf_path) as rdr:
+            for spec in rdr:
+                spectra.append(spec)
+    except Exception:
+        # If we can't even open/parse, bail out and keep the original
+        return mgf_path
+
+    if not spectra:
+        # Nothing to convert; just return the original path.
+        return mgf_path
+
+    base = os.path.splitext(mgf_path)[0]
+    mzml_path = base + "__converted_ms1.mzML"
+
+    with open(mzml_path, "wb") as fh:
+        writer = pymzml.MzMLWriter(fh, mzml_mode="indexed")
+        with writer:
+            writer.controlled_vocabularies()
+            writer.write_run_header()
+            writer.write_spectrum_list_header(count=len(spectra))
+
+            for idx, spec in enumerate(spectra, start=1):
+                mz_arr = np.asarray(spec.get("m/z array", []), dtype=float)
+                i_arr  = np.asarray(spec.get("intensity array", []), dtype=float)
+
+                params = spec.get("params", {}) or {}
+                rt_raw = params.get("rtinseconds", 0.0)
+                try:
+                    rt = float(rt_raw)
+                except Exception:
+                    rt = 0.0
+
+                writer.write_spectrum(
+                    mz_arr,
+                    i_arr,
+                    id=f"scan={idx}",
+                    params={
+                        "ms level": 1,
+                        "scan start time": (rt, "second"),
+                        "centroid spectrum": None,
+                        "total ion current": float(i_arr.sum()),
+                    },
+                )
+
+            writer.write_spectrum_list_footer()
+            writer.write_run_footer()
+
+    return mzml_path
 
 
 # ============================================================
@@ -762,8 +828,20 @@ def _build_ms_scan_index(ms_path: str):
                     "rtinseconds": P.get("rtinseconds"),
                     "scans": P.get("scans"),
                 }
-                mz = spec.get("m/z array") or spec.get("m/z") or []
-                I  = spec.get("intensity array") or spec.get("intensity") or []
+
+                # Avoid boolean evaluation of NumPy arrays
+                mz = spec.get("m/z array", None)
+                if mz is None:
+                    mz = spec.get("m/z", None)
+                if mz is None:
+                    mz = []
+
+                I = spec.get("intensity array", None)
+                if I is None:
+                    I = spec.get("intensity", None)
+                if I is None:
+                    I = []
+
             else:
                 P = {}
                 params = {
@@ -853,11 +931,24 @@ st.caption("Upload an MS file (.mgf, .mzML, .mzXML) and one or more MassQL compe
 with st.sidebar:
     st.header("1) Inputs")
     up_ms_files = st.file_uploader(
-    "MS files (.mgf / .mzML / .mzXML)",
-    type=["mgf", "mzml", "mzxml"],
-    accept_multiple_files=True
-)
-    up_comps = st.file_uploader("Compendium .txt files (multiple)", type=["txt"], accept_multiple_files=True)
+        "MS files (.mgf / .mzML / .mzXML)",
+        help=".mgf files exported using 'Export Scans' and selecting MS1 data can be used.",
+        type=["mgf", "mzml", "mzxml"],
+        accept_multiple_files=True
+    )
+    # NEW: option to convert MS1-only MGF to mzML
+    convert_ms1_mgf_flag = st.checkbox(
+        "Convert MS1-only MGF to mzML for MS1 queries",
+        value=False,
+        help="If checked, any uploaded .mgf file will be converted to a simple MS1 mzML before running MassQL."
+    )
+
+    up_comps = st.file_uploader(
+        "Compendium .txt files (multiple)",
+        type=["txt"],
+        accept_multiple_files=True,
+        help=".txt file with separate MassQL queries.",
+    )
 
     st.header("2) Qualifier overrides (applied to all)")
     colA, colB, colC = st.columns(3)
@@ -935,6 +1026,40 @@ if run_btn:
             p, n = _persist_upload(f)
             comp_paths.append(p)
             comp_names.append(n)
+            
+        # Optionally convert MS1-only MGF → mzML for MassQL MS1 queries
+        converted_files = []  # list of (display_name, converted_path)
+        ms_paths_effective = []
+
+        for p, disp in zip(ms_paths, ms_displays):
+            ext = Path(p).suffix.lower()
+            if convert_ms1_mgf_flag and ext == ".mgf":
+                try:
+                    mzml_p = convert_ms1_mgf_to_mzml(p)
+
+                    # Only treat as "converted" if we actually got a new mzML file
+                    if Path(mzml_p).suffix.lower() == ".mzml" and mzml_p != p:
+                        ms_paths_effective.append(mzml_p)
+                        converted_files.append((disp, mzml_p))
+                        st.info(
+                            f"Converted MS1 MGF → mzML for {disp} → {os.path.basename(mzml_p)}"
+                        )
+                    else:
+                        ms_paths_effective.append(p)
+                        st.warning(
+                            f"MGF→mzML conversion skipped for {disp}: "
+                            "no spectra found or conversion did not produce a new mzML file."
+                        )
+                except Exception as e:
+                    ms_paths_effective.append(p)
+                    st.warning(
+                        f"MGF→mzML conversion failed for {disp}; using original MGF. "
+                        f"Error: {e}"
+                    )
+            else:
+                ms_paths_effective.append(p)
+
+
 
         # Build overrides
         overrides = {"*": {"TOLERANCEMZ": float(tol_mz), "INTENSITYPERCENT": int(inten_pct)}}
@@ -952,13 +1077,13 @@ if run_btn:
             except Exception as e:
                 st.warning(f"Invalid JSON for per-compendium overrides: {e}")
 
-        # Map: full path -> human display name
-        source_name_map = {p: (d or os.path.basename(p)) for p, d in zip(ms_paths, ms_displays)}
+        ## Map: full path -> human display name (using effective paths!)
+        source_name_map = {p: (d or os.path.basename(p)) for p, d in zip(ms_paths_effective, ms_displays)}
 
         with st.spinner("Running MassQL queries..."):
             combined, presence_by_comp, presence_global = run_compendiums(
                 compendium_files=comp_paths,
-                mgf_files=ms_paths,          # <<< ALL MS FILES HERE
+                mgf_files=ms_paths_effective,  # <<< use effective paths here
                 use_loader_frames=True,
                 parallel=False,
                 qualifier_overrides=overrides,
@@ -966,18 +1091,32 @@ if run_btn:
             )
 
         # Build one scan index per MS file for the viewer
-        ms_indexes = {p: _build_ms_scan_index(p) for p in ms_paths}
+        ms_indexes = {p: _build_ms_scan_index(p) for p in ms_paths_effective}
 
         # Save in state
         state.combined = combined
         state.presence_by_comp = presence_by_comp
         state.presence_global = presence_global
-        state.ms_paths = ms_paths
+        state.ms_paths = ms_paths_effective
         state.ms_indexes = ms_indexes
         state.source_name_map = source_name_map
         state.last_comp_paths = comp_paths
 
         st.success("Done.")
+
+        # Let the user download any converted mzML files
+        if converted_files:
+            st.markdown("### Download converted mzML files")
+            for disp, mzml_p in converted_files:
+                label = f"Download {Path(disp).stem}__converted_ms1.mzML"
+                with open(mzml_p, "rb") as fh:
+                    st.download_button(
+                        label=label,
+                        data=fh.read(),
+                        file_name=os.path.basename(mzml_p),
+                        mime="application/octet-stream",
+                        key=f"dl_{os.path.basename(mzml_p)}",
+                    )
 
         # ---------- DIAGNOSTICS if nothing came back ----------
         if state.combined is None or state.combined.empty:
@@ -1018,11 +1157,6 @@ if not combined.empty:
         st.metric("Compendiums", f"{combined['compendium'].nunique():,}")
     with c4:
         st.metric("Sections", f"{combined['section'].nunique():,}")
-
-    st.markdown("**Per file × compendium × section**")
-    summary = summarize_results(combined)
-    st.markdown(html_table(summary, 200), unsafe_allow_html=True)
-    st.download_button("Download summary.csv", data=download_csv_bytes(summary), file_name="summary.csv")
 
     st.markdown("---")
     st.markdown("### Global presence (compendium × section)")
