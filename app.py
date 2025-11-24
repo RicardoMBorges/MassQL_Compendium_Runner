@@ -586,7 +586,7 @@ def run_compendiums(
                         ms_path,
                         ms1_df=ms1_df,
                         ms2_df=ms2_df,
-                        cache=None,
+                        cache=True,
                         parallel=parallel
                     )
                 except Exception as e:
@@ -1261,5 +1261,6 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
 
