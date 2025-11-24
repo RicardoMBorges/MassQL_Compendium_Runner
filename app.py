@@ -89,13 +89,26 @@ def _extract_meta_from_spec(spec: dict, seq: int, ext: str):
         except Exception:
             scan = seq
 
-        # precursor
+        # ---------- FIXED PEPMASS HANDLING ----------
         pep = P.get("pepmass")
-        pepmz = pep[0] if isinstance(pep, (list, tuple, np.ndarray)) else pep
-        try:
-            pepmz = float(pepmz)
-        except Exception:
-            pepmz = float("nan")
+
+        # pep can be: number, list, tuple, array, or "mz intensity"
+        if isinstance(pep, (list, tuple, np.ndarray)):
+            raw = pep[0] if len(pep) > 0 else None
+        else:
+            raw = pep
+
+        mz_val = None
+        if raw is not None:
+            # Take only the first token (handles "221.025 1000.0")
+            tok = str(raw).strip().split()[0]
+            try:
+                mz_val = float(tok)
+            except Exception:
+                mz_val = None
+
+        pepmz = mz_val if mz_val is not None else float("nan")
+        # --------------------------------------------
 
         # RT (in seconds if available, else 0)
         rt_raw = P.get("rtinseconds", P.get("rt", None))
@@ -164,6 +177,7 @@ def _extract_meta_from_spec(spec: dict, seq: int, ext: str):
         pass
 
     return scan, pepmz, rtsec
+
 
 def _find_scan_col(df: pd.DataFrame) -> str | None:
     for cand in ("scan", "SCANS", "Scan", "Scans"):
@@ -1261,6 +1275,7 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
 
 
