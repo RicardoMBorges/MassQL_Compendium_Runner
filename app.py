@@ -7,7 +7,7 @@
 # ✅ Presence tables + named tables + CSV downloads (no Arrow)
 # -----------------------------------------------------------
 
-import os, re, io, math, tempfile, pathlib, json
+import os, re, io, math, tempfile, pathlib, json 
 from pathlib import Path
 from typing import List, Dict, Tuple
 from PIL import Image
@@ -228,7 +228,7 @@ def smoke_test_massql(ms_path: str) -> tuple[bool, str]:
         return False, "MS path missing"
     try:
         q = "QUERY scaninfo(MS2DATA)"
-        res = msql_engine.process_query(q, ms_path, ms1_df=None, ms2_df=None, cache=None, parallel=False)
+        res = msql_engine.process_query(q, ms_path, ms1_df=None, ms2_df=None, cache=None, parallel=True)
         return (not res.empty), f"Rows: {len(res)}"
     except Exception as e:
         return False, f"MassQL error: {e}"
@@ -1261,4 +1261,5 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
