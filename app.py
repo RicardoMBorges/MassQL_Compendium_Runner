@@ -21,7 +21,20 @@ import streamlit.components.v1 as components
 
 from pyteomics import mgf, mzml, mzxml
 import pymzml
-from massql import msql_engine, msql_fileloading
+# --- Patch MassQL MGF loader to force correct scan numbers ---
+from matchms.importing import load_from_mgf
+
+def patched_load_from_mgf(path):
+    spectra = list(load_from_mgf(path))
+    for i, spec in enumerate(spectra, start=1):
+        if not hasattr(spec, "metadata"):
+            continue
+        # Force proper scan numbering
+        spec.metadata["scans"] = i  
+    return spectra
+
+# Override MassQL internal loader
+msql_fileloading.load_from_mgf = patched_load_from_mgf
 
 # ---------- Config: NEVER use pyarrow-backed display ----------
 st.set_page_config(page_title="MassQL Compendium Viewer", layout="wide")
@@ -1275,6 +1288,7 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
 
 
