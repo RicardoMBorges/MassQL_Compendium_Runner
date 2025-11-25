@@ -5,7 +5,7 @@
 # ✅ Qualifier overrides (global or per-compendium name)
 # ✅ Interactive MS/MS (zoom/hover via mpld3 inside Streamlit)
 # ✅ Presence tables + named tables + CSV downloads (no Arrow)
-# -----------------------------------------------------------
+# ----------------------------------------------------------- 
 
 import os, re, io, math, tempfile, pathlib, json 
 from pathlib import Path
@@ -520,7 +520,7 @@ def _select_overrides(qualifier_overrides: Dict[str, Dict[str, float]] | None, c
     return {**base, **spec} if (base or spec) else None
 
 # ============================================================
-# MassQL runner
+# MassQL runner (com suporte a OR entre MS2PROD e MS2NL)
 # ============================================================
 def run_compendiums(
     compendium_files: List[str],
@@ -610,15 +610,90 @@ def run_compendiums(
                 if comp_over:
                     qtext = apply_qualifier_overrides(qtext, comp_over)
 
+                # ------------------------------------------------------------
+                # PATCH: suporte a OR entre MS2PROD e MS2NL
+                # Lógica:
+                #   Se o texto do query contém MS2PROD, MS2NL e " OR ",
+                #   tentamos reescrever:
+                #       ... AND (MS2PROD ... OR MS2NL ...)
+                #   em dois queries independentes:
+                #       Q_prod: ... AND MS2PROD ...
+                #       Q_nl  : ... AND MS2NL  ...
+                #   Rodamos ambos e fazemos a UNIÃO dos resultados.
+                # ------------------------------------------------------------
                 try:
-                    res = msql_engine.process_query(
-                        qtext,
-                        ms_path,
-                        ms1_df=ms1_df,
-                        ms2_df=ms2_df,
-                        cache=True,
-                        parallel=parallel
+                    upper_q = qtext.upper()
+                    use_or_patch = (
+                        " OR " in upper_q and
+                        "MS2PROD" in upper_q and
+                        "MS2NL" in upper_q
                     )
+
+                    if use_or_patch:
+                        # Procurar explicitamente o padrão "MS2PROD ... OR MS2NL ..."
+                        m = re.search(
+                            r'(MS2PROD[^O]+?)\s+OR\s+(MS2NL[^\n)]+)',
+                            qtext,
+                            flags=re.IGNORECASE
+                        )
+
+                        if m:
+                            part_prod = m.group(1)
+                            part_nl   = m.group(2)
+
+                            prefix = qtext[:m.start()]
+                            suffix = qtext[m.end():]
+
+                            q_prod = prefix + part_prod + suffix
+                            q_nl   = prefix + part_nl   + suffix
+
+                            sub_results: List[pd.DataFrame] = []
+                            for subq in (q_prod, q_nl):
+                                # sanity: evitar "WHERE WHERE"
+                                subq = subq.replace("WHERE WHERE", "WHERE")
+                                try:
+                                    r = msql_engine.process_query(
+                                        subq,
+                                        ms_path,
+                                        ms1_df=ms1_df,
+                                        ms2_df=ms2_df,
+                                        cache=True,
+                                        parallel=parallel
+                                    )
+                                    if r is not None and len(r) > 0:
+                                        sub_results.append(r)
+                                except Exception as e_sub:
+                                    st.info(
+                                        f"[INFO] Sub-query failed "
+                                        f"({comp_name} :: {section} #{q_idx}): {e_sub}"
+                                    )
+
+                            if sub_results:
+                                res = pd.concat(sub_results, ignore_index=True).drop_duplicates()
+                            else:
+                                res = pd.DataFrame()
+
+                        else:
+                            # Se o padrão não for encontrado, cai de volta no comportamento padrão
+                            res = msql_engine.process_query(
+                                qtext,
+                                ms_path,
+                                ms1_df=ms1_df,
+                                ms2_df=ms2_df,
+                                cache=True,
+                                parallel=parallel
+                            )
+                    else:
+                        # Query sem OR problemático → MassQL normal
+                        res = msql_engine.process_query(
+                            qtext,
+                            ms_path,
+                            ms1_df=ms1_df,
+                            ms2_df=ms2_df,
+                            cache=True,
+                            parallel=parallel
+                        )
+
                 except Exception as e:
                     st.info(f"[INFO] Query failed ({comp_name} :: {section} #{q_idx}) on {os.path.basename(ms_path)}: {e}")
                     continue
@@ -685,6 +760,7 @@ def run_compendiums(
                 if sc_col is not None:
                     _res_sc = pd.to_numeric(res[sc_col], errors="coerce").dropna()
                     if not _res_sc.empty and ms_scans_max > 0 and _res_sc.max() < ms_scans_max:
+                        # aqui poderíamos logar algo se fosse necessário
                         pass
 
                 all_hits.append(res)
@@ -752,6 +828,7 @@ def run_compendiums(
                 presence_by_comp[comp] = pres
 
     return combined_unique, presence_by_comp, presence_global
+
 
 
 # ============================================================
@@ -1291,6 +1368,7 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
 
 
