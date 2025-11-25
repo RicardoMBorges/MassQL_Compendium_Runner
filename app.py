@@ -31,9 +31,30 @@ def patched_load_from_mgf(path):
     for i, spec in enumerate(spectra, start=1):
         if not hasattr(spec, "metadata"):
             continue
-        # Force proper scan numbering
-        spec.metadata["scans"] = i  
+
+        meta = spec.metadata
+
+        # force scan number alignment
+        meta["scans"] = i
+
+        # 🔥 MASSQL FIX: ensure precursor mz and charge exist
+        # GNPS mgf files often have PEPMASS but no CHARGE
+        # — NL engine will NOT compute NL without charge.
+        if "charge" not in meta or meta["charge"] in (None, "", "0"):
+            meta["charge"] = 1   # force positive mode
+
+        # also fix precursor mz if needed
+        pep = meta.get("pepmass")
+        if pep and isinstance(pep, (list,tuple)):
+            meta["precursor_mz"] = float(str(pep[0]).split()[0])
+        elif isinstance(pep, str):
+            meta["precursor_mz"] = float(pep.split()[0])
+
     return spectra
+
+# override in MassQL
+msql_fileloading.load_from_mgf = patched_load_from_mgf
+
 
 # Override MassQL internal loader
 msql_fileloading.load_from_mgf = patched_load_from_mgf
@@ -1365,6 +1386,7 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
 
 
