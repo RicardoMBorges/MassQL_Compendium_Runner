@@ -98,12 +98,9 @@ def _extract_meta_from_spec(spec: dict, seq: int, ext: str):
     if ext == ".mgf":
         P = spec.get("params", {}) or {}
 
-        # scan
-        sraw = P.get("scans")
-        try:
-            scan = int(str(sraw).strip()) if sraw is not None else seq
-        except Exception:
-            scan = seq
+        # IMPORTANT: force sequential scan numbers (1..N) to match MassQL
+        # and the patched load_from_mgf loader.
+        scan = seq
 
         # ---------- FIXED PEPMASS HANDLING ----------
         pep = P.get("pepmass")
@@ -1368,6 +1365,7 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
 
 
