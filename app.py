@@ -650,10 +650,11 @@ def run_compendiums(
                     if use_or_patch:
                         # Procurar explicitamente o padrão "MS2PROD ... OR MS2NL ..."
                         m = re.search(
-                            r'(MS2PROD[^O]+?)\s+OR\s+(MS2NL[^\n)]+)',
+                            r'(MS2PROD[^\n]*?)\s+OR\s+(MS2NL[^\n]*)',
                             qtext,
                             flags=re.IGNORECASE
                         )
+
 
                         if m:
                             part_prod = m.group(1)
@@ -1386,6 +1387,7 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
 
 
