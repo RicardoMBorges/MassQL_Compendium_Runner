@@ -21,6 +21,7 @@ import streamlit.components.v1 as components
 
 from pyteomics import mgf, mzml, mzxml
 import pymzml
+from massql import msql_engine, msql_fileloading
 # --- Patch MassQL MGF loader to force correct scan numbers ---
 from matchms.importing import load_from_mgf
 
@@ -1288,6 +1289,7 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
 
 
