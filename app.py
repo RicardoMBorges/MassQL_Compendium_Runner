@@ -56,10 +56,6 @@ def patched_load_from_mgf(path):
 msql_fileloading.load_from_mgf = patched_load_from_mgf
 
 
-# Override MassQL internal loader
-msql_fileloading.load_from_mgf = patched_load_from_mgf
-
-
 # ---------- Config: NEVER use pyarrow-backed display ----------
 st.set_page_config(page_title="MassQL Compendium Viewer", layout="wide")
 
@@ -1387,6 +1383,7 @@ if not combined.empty:
             st.info("No scans available to display for this file.")
 else:
     st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+
 
 
 
