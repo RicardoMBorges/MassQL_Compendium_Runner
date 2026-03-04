@@ -21,8 +21,9 @@ import streamlit.components.v1 as components
 
 from pyteomics import mgf, mzml, mzxml
 import pymzml
+
 from massql import msql_fileloading
-# --- Patch MassQL MGF loader to force correct scan numbers ---
+from massql import msql_engine   
 from matchms.importing import load_from_mgf
 
 def patched_load_from_mgf(path):
@@ -36,9 +37,6 @@ def patched_load_from_mgf(path):
         # force scan number alignment
         meta["scans"] = i
 
-        # 🔥 MASSQL FIX: ensure precursor mz and charge exist
-        # GNPS mgf files often have PEPMASS but no CHARGE
-        # — NL engine will NOT compute NL without charge.
         if "charge" not in meta or meta["charge"] in (None, "", "0"):
             meta["charge"] = 1   # force positive mode
 
@@ -54,9 +52,6 @@ def patched_load_from_mgf(path):
 # override in MassQL
 msql_fileloading.load_from_mgf = patched_load_from_mgf
 
-
-# Override MassQL internal loader
-msql_fileloading.load_from_mgf = patched_load_from_mgf
 
 # ---------- Config: NEVER use pyarrow-backed display ----------
 st.set_page_config(page_title="MassQL Compendium Viewer", layout="wide")
@@ -75,734 +70,6 @@ def download_csv_bytes(df: pd.DataFrame, sep: str = ";") -> bytes:
     df.to_csv(buf, sep=sep, index=False)
     return buf.getvalue().encode("utf-8")
     
-# ============================================================
-# MASSQL engine modified
-# ============================================================
-import os
-import pandas as pd
-import numpy as np
-import copy
-import logging
-from tqdm import tqdm
-
-from py_expression_eval import Parser
-
-from massql import msql_parser
-from massql import msql_fileloading
-from massql import msql_engine_filters
-from massql.msql_engine_filters import _get_mz_tolerance, _get_minintensity
-#import msql_engine_internal as msql_engine
-
-math_parser = Parser()
-console = logging.StreamHandler()
-console.setLevel(logging.INFO)
-
-def DEBUG_MSG(msg):
-    import sys
-
-    print(msg, file=sys.stderr, flush=True)
-
-
-def _get_ppm_tolerance(qualifiers):
-    if qualifiers is None:
-        return None
-
-    if "qualifierppmtolerance" in qualifiers:
-        ppm = qualifiers["qualifierppmtolerance"]["value"]
-        return ppm
-
-    return None
-
-def _get_da_tolerance(qualifiers):
-    if qualifiers is None:
-        return None
-
-    if "qualifiermztolerance" in qualifiers:
-        return qualifiers["qualifiermztolerance"]["value"]
-
-    return None
-
-
-def process_query(input_query, input_filename, path_to_grammar=None, 
-                    cache=None, cache_dir=None, cache_file=None,
-                    parallel=False, ms1_df=None, ms2_df=None):
-    """
-    Process an actual query
-
-    Args:
-        input_query ([type]): [description]
-        input_filename ([type]): [description]
-        path_to_grammar ([type], optional): [description]. Defaults to None.
-        cache (bool, optional): [description]. Defaults to True.
-        parallel (bool, optional): [description]. Defaults to False.
-        ms1_df ([type], optional): [description]. Defaults to None. Pass in if you have these data in memory
-        ms2_df ([type], optional): [description]. Defaults to None. Pass in if you have these data in memory
-
-    Returns:
-        query results data frame: [description]
-    """
-
-    parsed_dict = msql_parser.parse_msql(input_query, path_to_grammar=path_to_grammar)
-
-    return _evalute_variable_query(parsed_dict, input_filename, 
-                                    cache=cache, cache_dir=cache_dir, cache_file=cache_file,
-                                    parallel=parallel, ms1_df=ms1_df, ms2_df=ms2_df)
-
-def _determine_mz_max(mz, ppm_tol, da_tol):
-    da_tol = da_tol if da_tol < 10000 else 0
-    ppm_tol = ppm_tol if ppm_tol < 10000 else 0
-    # We are going to make the bins half of the actual tolerance
-    half_delta = max(mz * ppm_tol / 1000000, da_tol) / 2
-
-    half_delta = half_delta if half_delta > 0 else 0.05
-
-    return mz + half_delta
-
-def _evalute_variable_query(parsed_dict, input_filename, 
-                            cache=None, cache_dir=None, cache_file=None,
-                            parallel=False, ms1_df=None, ms2_df=None):
-    # Lets check if there is a variable in here, the only one allowed is X
-    for condition in parsed_dict["conditions"]:
-        try:
-            if "querytype" in condition["value"][0]:
-                subquery_val_df = _evalute_variable_query(
-                    condition["value"][0], input_filename, 
-                    cache=cache, cache_dir=cache_dir, cache_file=cache_file
-                )
-                condition["value"] = list(
-                    subquery_val_df["precmz"]
-                )  # Flattening results
-        except:
-            pass
-
-    # Variable Expression Parameters
-    variable_properties = {}
-    variable_properties["has_variable"] = False
-    variable_properties["ppm_tolerance"] = 100000
-    variable_properties["da_tolerance"] = 100000
-    variable_properties["query_ms1"] = False
-    variable_properties["query_ms2"] = False
-    variable_properties["query_ms2prec"] = False
-    variable_properties["min"] = 0
-    variable_properties["max"] = 1000000
-    variable_properties["mindefect"] = 0
-    variable_properties["maxdefect"] = 1
-    
-
-    # Checking for ranges in query
-    new_conditions = []
-    for condition in parsed_dict["conditions"]:
-        if condition["type"] == "xcondition":
-            if "min" in condition:
-                variable_properties["min"] = condition["min"]
-                variable_properties["max"] = condition["max"]
-            if "mindefect" in condition:
-                variable_properties["mindefect"] = condition["mindefect"]
-                variable_properties["maxdefect"] = condition["maxdefect"]
-        else:
-            new_conditions.append(condition)
-    parsed_dict["conditions"] = new_conditions
-
-    # Here we will check if there is a variable in the expression
-    for condition in parsed_dict["conditions"]:
-        if not "value" in condition:
-            # If there is no value in the condition, e.g. retention time and mobility
-            continue
-        
-        for value in condition["value"]:
-            try:
-                # Checking if X is in any string
-                # TODO: Check multiple conditions, to see if any of them have an X, e.g. (101 OR X-10)
-                if "X" in value[0]:
-                    if value == "X":
-                        # This is the main varaible, not expression containing it
-                        if condition["type"] == "ms1mzcondition":
-                            variable_properties["query_ms1"] = True
-                        if condition["type"] == "ms2productcondition":
-                            variable_properties["query_ms2"] = True
-                        if condition["type"] == "ms2neutrallosscondition":
-                            variable_properties["query_ms2"] = True
-                        if condition["type"] == "ms2precursorcondition":
-                            variable_properties["query_ms2prec"] = True
-
-                    variable_properties["has_variable"] = True
-                    #mz_tolerance = _get_mz_tolerance(condition.get("qualifiers", None), 1000000)
-
-                    ppm_tolerance = _get_ppm_tolerance(condition.get("qualifiers", None))
-                    da_tolerance = _get_da_tolerance(condition.get("qualifiers", None))
-
-                    if da_tolerance is not None:
-                        variable_properties["da_tolerance"] = min(variable_properties["da_tolerance"], da_tolerance)
-                    if ppm_tolerance is not None:
-                        variable_properties["ppm_tolerance"] = min(variable_properties["ppm_tolerance"], ppm_tolerance)                    
-                    continue
-            except TypeError:
-                # This is when the target is actually a float
-                pass
-
-    # Loading data if not passed in 
-    if ms1_df is None:
-        ms1_df, ms2_df = msql_fileloading.load_data(input_filename, 
-                                                    cache=cache, cache_dir=cache_dir, cache_file=cache_file)
-
-    # Setting types for DF
-    try:
-        ms1_df["scan"] = ms1_df["scan"].astype(int)
-        ms2_df["scan"] = ms2_df["scan"].astype(int)
-    except:
-        pass
-
-    # Here we are going to translate the variable query into a concrete query based upon the data
-    all_concrete_queries = []
-    if variable_properties["has_variable"]:
-        # Here we could do a pre-query without any of the other conditions
-        presearch_parse = copy.deepcopy(parsed_dict)
-        non_variable_conditions = []
-        for condition in presearch_parse["conditions"]:
-            if "value" in condition:
-                for value in condition["value"]:
-                    try:
-                        # Checking if X is in any string
-                        if "X" in value:
-                            continue
-                    except TypeError:
-                        # This is when the target is actually a float
-                        pass
-                    non_variable_conditions.append(condition)
-            elif "min" in condition:
-                min_val = condition["min"]
-                max_val = condition["max"]
-                try:
-                    if "X" in min_val:
-                        continue
-                except TypeError:
-                    # This is when the target is actually a float
-                    pass
-
-                try:
-                    if "X" in max_val:
-                        continue
-                except TypeError:
-                    # This is when the target is actually a float
-                    pass
-
-                non_variable_conditions.append(condition)
-
-        presearch_parse["conditions"] = non_variable_conditions
-
-        ms1_df, ms2_df = _executeconditions_query(presearch_parse, input_filename, 
-                                                cache=cache, cache_dir=cache_dir, cache_file=cache_file)
-        variable_x_ms1_df = ms1_df
-
-        # Here we are trying to pre-filter conditions based upon the qualifiers to make the variable search space smaller
-        for condition in parsed_dict["conditions"]:
-            if not condition["conditiontype"] == "where":
-                continue
-
-            if "value" in condition:
-                if not "X" in condition["value"]:
-                    continue
-        
-            # Filtering MS1 peaks only to consider contention for X
-            if condition["type"] == "ms1mzcondition":
-                min_int, min_intpercent, min_tic_percent_intensity = _get_minintensity(condition.get("qualifiers", None))
-                variable_x_ms1_df = ms1_df[
-                    (ms1_df["i"] > min_int) & 
-                    (ms1_df["i_norm"] > min_intpercent) & 
-                    (ms1_df["i_tic_norm"] > min_tic_percent_intensity)]
-
-            # TODO: Do this for other types of variables
-
-        # Here we will start with the smallest mass and then go up
-        masses_considered_df_list = []
-        if variable_properties["query_ms1"]:
-            masses_considered_df_list.append(variable_x_ms1_df["mz"])
-        if variable_properties["query_ms2"]:
-            masses_considered_df_list.append(ms2_df["mz"])
-        if variable_properties["query_ms2prec"]:
-            masses_considered_df_list.append(ms2_df["precmz"])
-
-        masses_considered_df = pd.DataFrame()
-        masses_considered_df["mz"] = pd.concat(masses_considered_df_list)
-        # NOTE: This might cause bugs, we might consider every mass within every single scan, or at least we could make the tolernace as even smaller than half the max
-        masses_considered_df["mz_max"] = masses_considered_df["mz"].apply(lambda x: _determine_mz_max(x, variable_properties["ppm_tolerance"], variable_properties["da_tolerance"]))
-        
-        masses_considered_df = masses_considered_df.sort_values("mz")
-        masses_list = masses_considered_df.to_dict(orient="records")
-
-        running_max_mz = 0
-        for masses_obj in tqdm(masses_list):
-            mz_val = masses_obj["mz"]
-
-            if running_max_mz > mz_val:
-                continue
-
-            # Cheking the validity of the mz_val
-            if mz_val < variable_properties["min"] or mz_val > variable_properties["max"]:
-                continue
-            mz_val_defect = mz_val - int(mz_val)
-            if mz_val_defect < variable_properties["mindefect"] or mz_val_defect > variable_properties["maxdefect"]:
-                continue
-
-            #######################
-            # Writing new query
-            #######################
-            substituted_parse = copy.deepcopy(parsed_dict)
-            
-            for condition in substituted_parse["conditions"]:
-                # This is for standard conditions
-                if "value" in condition:
-                    for i, value in enumerate(condition["value"]):
-                        # Rewriting the condition value
-                        try:
-                            if "X" in value:
-                                new_value = math_parser.parse(value).evaluate({
-                                    "X" : mz_val
-                                })
-                                condition["value"][i] = new_value
-                        except TypeError:
-                            # This is when the target is actually a float
-                            pass
-
-                        # Rewriting the qualifier values
-                        try:
-                            if "qualifiers" in condition:
-                                for qualifier in condition["qualifiers"]:
-                                    if "qualifier" in qualifier:
-                                        if "value" in condition["qualifiers"][qualifier]:
-                                            old_value = condition["qualifiers"][qualifier]["value"]
-                                            condition["qualifiers"][qualifier]["value"] = old_value.replace("X", str(mz_val))
-                        except AttributeError:
-                            pass
-                
-                # TODO: For other types of conditions that might include variables
-                if "min" in condition:
-                    # Rewriting the condition min
-                    value = condition["min"]
-                    try:
-                        if "X" in value:
-                            new_value = math_parser.parse(value).evaluate({
-                                "X" : mz_val
-                            })
-                            condition["min"] = new_value
-                    except TypeError:
-                        # This is when the target is actually a float
-                        pass
-
-                if "max" in condition:
-                    # Rewriting the condition min
-                    value = condition["max"]
-                    try:
-                        if "X" in value:
-                            new_value = math_parser.parse(value).evaluate({
-                                "X" : mz_val
-                            })
-                            condition["max"] = new_value
-                    except TypeError:
-                        # This is when the target is actually a float
-                        pass
-            
-            # Let's consider this mz
-            running_max_mz = masses_obj["mz_max"]
-
-            # Checking the x conditions
-            substituted_parse["comment"] = str(mz_val)
-
-            all_concrete_queries.append(substituted_parse)
-    else:
-        all_concrete_queries.append(parsed_dict)
-
-    print("TOTAL QUERIES", len(all_concrete_queries))
-
-    # Perfoming all the concrete queries
-    collated_list = [] # This list holds the collated set of results from each query, final result is a concat of all of them
-
-    execute_serial = True
-
-    # We have no parallel path right now
-    if execute_serial or parallel:
-        # Serial Version
-        for concrete_query in tqdm(all_concrete_queries):
-            results_ms1_df, results_ms2_df = _executeconditions_query(concrete_query, input_filename, ms1_input_df=ms1_df, ms2_input_df=ms2_df, 
-                                                                    cache=cache, cache_dir=cache_dir, cache_file=cache_file)
-            
-            collated_df = _executecollate_query(parsed_dict, results_ms1_df, results_ms2_df)
-            collated_list.append(collated_df)
-
-    # Concatenating all the results
-    collated_df = pd.concat(collated_list)
-    collated_df = collated_df.reset_index(drop=True)
-
-    # Lets try to remove duplicates
-    try:
-        if "comment" in collated_df:
-            collated_df["truncated_comment"] = collated_df["comment"].astype(float).astype(int)
-            collated_df = collated_df.drop_duplicates(subset=["scan", "truncated_comment"])
-            collated_df = collated_df.drop("truncated_comment", axis=1)
-    except:
-        pass
-        
-    return collated_df
-
-
-def _executeconditions_query(parsed_dict, input_filename, ms1_input_df=None, ms2_input_df=None, 
-                            cache=True, cache_dir=None, cache_file=None):
-    # This function attempts to find the data that the query specifies in the conditions
-    
-    import json
-    print("parsed_dict", json.dumps(parsed_dict, indent=4))
-
-    # Let's apply this to real data
-    # --- PATCH: ALWAYS use provided ms1_df/ms2_df if available ---
-    if ms1_input_df is not None and ms2_input_df is not None:
-        ms1_df = ms1_input_df
-        ms2_df = ms2_input_df
-    else:
-        ms1_df, ms2_df = msql_fileloading.load_data(
-            input_filename,
-            cache=cache,
-            cache_dir=cache_dir,
-            cache_file=cache_file
-        )
-
-    # Saving out the full unfiltered data
-    ms1_original_df = ms1_df
-    ms2_original_df = ms2_df
-
-    # In order to handle intensities, we will make sure to sort all conditions with 
-    # with the conditions that are the reference intensity first, then subsequent conditions
-    # that have an intensity match will reference the saved reference intensities
-    reference_conditions_register = {} # This will hold all the reference intensity values
-    
-    # This helps sort the qualifiers
-    reference_conditions = []
-    nonreference_conditions = []
-    for condition in parsed_dict["conditions"]:
-        if "qualifiers" in condition:
-            if "qualifierintensityreference" in condition["qualifiers"]:
-                reference_conditions.append(condition)
-                continue
-        nonreference_conditions.append(condition)
-    all_conditions = reference_conditions + nonreference_conditions
-
-    # These are for the WHERE clause, first lets filter by RT and polarity and scan
-    for condition in all_conditions:
-        if not condition["conditiontype"] == "where":
-            continue
-
-        # RT Filters
-        if condition["type"] == "rtmincondition":
-            rt = condition["value"][0]
-            ms2_df = ms2_df[ms2_df["rt"] > rt]
-            ms1_df = ms1_df[ms1_df["rt"] > rt]
-
-            continue
-
-        if condition["type"] == "rtmaxcondition":
-            rt = condition["value"][0]
-            ms2_df = ms2_df[ms2_df["rt"] < rt]
-            ms1_df = ms1_df[ms1_df["rt"] < rt]
-
-            continue
-    
-        # Polarity Filters
-        if condition["type"] == "polaritycondition":
-            polaritycondition = condition["value"][0]
-            if polaritycondition == "positivepolarity":
-                ms2_df = ms2_df[ms2_df["polarity"] == 1]
-                ms1_df = ms1_df[ms1_df["polarity"] == 1]
-            if polaritycondition == "negativepolarity":
-                ms2_df = ms2_df[ms2_df["polarity"] == 2]
-                ms1_df = ms1_df[ms1_df["polarity"] == 2]
-
-            continue
-
-        # Scan Filters
-        if condition["type"] == "scanmincondition":
-            scan = int(condition["value"][0])
-            ms2_df = ms2_df[ms2_df["scan"] >= scan]
-            ms1_df = ms1_df[ms1_df["scan"] >= scan]
-
-            continue
-            
-        if condition["type"] == "scanmaxcondition":
-            scan = int(condition["value"][0])
-            ms2_df = ms2_df[ms2_df["scan"] <= scan]
-            ms1_df = ms1_df[ms1_df["scan"] <= scan]
-
-            continue
-
-        # Charge Filters
-        if condition["type"] == "chargecondition":
-            charge = int(condition["value"][0])
-            ms2_df = ms2_df[ms2_df["charge"] == charge]
-
-            # Filtering the MS1 data now
-            ms1_scans = set(ms2_df["ms1scan"])
-            ms1_df = ms1_df[ms1_df["scan"].isin(ms1_scans)]
-
-        # Mobility Filters
-        if condition["type"] == "mobilitycondition":
-            min_mobility = condition["min"]
-            max_mobility = condition["max"]
-
-            if "mobility" in ms2_df:
-                ms2_df = ms2_df[(ms2_df["mobility"] >= min_mobility) & (ms2_df["mobility"] <= max_mobility)]
-
-            if "mobility" in ms1_df.columns:
-                ms1_df = ms1_df[(ms1_df["mobility"] >= min_mobility) & (ms1_df["mobility"] <= max_mobility)]
-
-    # These are for the WHERE clause for peaks
-    for condition in all_conditions:
-        if not condition["conditiontype"] == "where":
-            continue
-
-        # Filtering MS2 Product Ions
-        if condition["type"] == "ms2productcondition":
-            ms1_df, ms2_df = msql_engine_filters.ms2prod_condition(condition, ms1_df, ms2_df, reference_conditions_register)
-            continue
-
-        # Filtering MS2 Precursor m/z
-        if condition["type"] == "ms2precursorcondition":
-            ms1_df, ms2_df = msql_engine_filters.ms2prec_condition(condition, ms1_df, ms2_df, reference_conditions_register)
-            continue
-
-        # Filtering MS2 Neutral Loss
-        if condition["type"] == "ms2neutrallosscondition":
-            ms1_df, ms2_df = msql_engine_filters.ms2nl_condition(condition, ms1_df, ms2_df, reference_conditions_register)
-            continue
-
-        # finding MS1 peaks
-        if condition["type"] == "ms1mzcondition":
-            ms1_df, ms2_df = msql_engine_filters.ms1_condition(condition, ms1_df, ms2_df, reference_conditions_register, ms1_original_df, ms2_original_df)
-            continue
-
-        skip_conditions = [ "rtmincondition", 
-                            "rtmaxcondition", 
-                            "polaritycondition", 
-                            "scanmincondition", 
-                            "scanmaxcondition",
-                            "chargecondition",
-                            "mobilitycondition"]
-        
-        if condition["type"] in skip_conditions:
-            continue
-
-        raise Exception("CONDITION NOT HANDLED")
-
-    # These are for the FILTER clause
-    for condition in all_conditions:
-        if not condition["conditiontype"] == "filter":
-            continue
-
-        # filtering MS1 peaks
-        if condition["type"] == "ms1mzcondition":
-            if len(ms1_df) == 0:
-                continue
-
-            # Applying the filters
-            ms1_df = msql_engine_filters.ms1_filter(condition, ms1_df)
-            continue
-        
-        if condition["type"] == "ms2productcondition":
-            if len(ms2_df) == 0:
-                continue
-
-            # TODO: Refactor into a function
-
-            mz = float(condition["value"][0])
-            mz_tol = _get_mz_tolerance(condition.get("qualifiers", None), mz)
-            mz_min = mz - mz_tol
-            mz_max = mz + mz_tol
-
-            min_int, min_intpercent, min_tic_percent_intensity = _get_minintensity(condition.get("qualifiers", None))
-
-            ms2_df = ms2_df[(ms2_df["mz"] > mz_min) & 
-                            (ms2_df["mz"] < mz_max) & 
-                            (ms2_df["i"] > min_int) & 
-                            (ms2_df["i_norm"] > min_intpercent) & 
-                            (ms2_df["i_tic_norm"] > min_tic_percent_intensity)]
-
-    if "comment" in parsed_dict:
-        ms1_df["comment"] = parsed_dict["comment"]
-        ms2_df["comment"] = parsed_dict["comment"]
-
-    return ms1_df, ms2_df
-
-def _executecollate_query(parsed_dict, ms1_df, ms2_df):
-    # This function takes the dataframes from executing the conditions and returns the proper formatted version
-
-    # Early Exit
-    if len(ms1_df) == 0 and len(ms2_df) == 0:
-        return pd.DataFrame()
-
-    # collating the results
-    if parsed_dict["querytype"]["function"] is None:
-        if parsed_dict["querytype"]["datatype"] == "datams1data":
-            return ms1_df
-        if parsed_dict["querytype"]["datatype"] == "datams2data":
-            return ms2_df
-    else:
-        # Applying function
-        if parsed_dict["querytype"]["function"] == "functionscansum":
-
-            # TODO: Fix how this scan is done so the result values for most things actually make sense
-            if parsed_dict["querytype"]["datatype"] == "datams1data":
-                if len(ms1_df) == 0:
-                    return ms1_df
-
-                ms1sum_df = ms1_df.groupby("scan").sum().reset_index()
-
-                ms1_df = ms1_df.groupby("scan").first().reset_index()
-                ms1_df["i"] = ms1sum_df["i"]
-
-                return ms1_df
-            if parsed_dict["querytype"]["datatype"] == "datams2data":
-                if len(ms2_df) == 0:
-                    return ms2_df
-
-                ms2sum_df = ms2_df.groupby("scan").sum().reset_index()
-                
-                ms2_df = ms2_df.groupby("scan").first().reset_index()
-                ms2_df["i"] = ms2sum_df["i"]
-
-                return ms2_df
-
-        if parsed_dict["querytype"]["function"] == "functionscanmz":
-            if len(ms2_df) == 0:
-                return ms2_df
-
-            result_df = pd.DataFrame()
-            result_df["precmz"] = list(set(ms2_df["precmz"]))
-            return result_df
-
-        if parsed_dict["querytype"]["function"] == "functionscannum":
-            result_df = pd.DataFrame()
-
-            if parsed_dict["querytype"]["datatype"] == "datams1data":
-                result_df["scan"] = list(set(ms1_df["scan"]))
-            if parsed_dict["querytype"]["datatype"] == "datams2data":
-                result_df["scan"] = list(set(ms2_df["scan"]))
-
-            return result_df
-
-        # scaninfo return function
-        if parsed_dict["querytype"]["function"] == "functionscaninfo":
-            result_df = pd.DataFrame()
-
-            if parsed_dict["querytype"]["datatype"] == "datams1data":
-                if len(ms1_df) == 0:
-                    return pd.DataFrame()
-
-                groupby_columns = ["scan"]
-                kept_columns = ["scan", "rt"]
-
-                if "comment" in ms1_df:
-                    groupby_columns.append("comment")
-                    kept_columns.append("comment")
-
-                if "mobility" in ms1_df:
-                    kept_columns.append("mobility")
-
-                result_df = ms1_df.groupby(groupby_columns).first().reset_index()
-                result_df = result_df[kept_columns]
-                result_df["mslevel"] = 1
-
-                ms1sum_df = ms1_df.groupby(groupby_columns).sum().reset_index()
-                ms1norm_df = ms1_df.groupby(groupby_columns).max().reset_index()
-                result_df["i"] = ms1sum_df["i"]
-                result_df["i_norm"] = ms1norm_df["i_norm"]
-            if parsed_dict["querytype"]["datatype"] == "datams2data":
-                if len(ms2_df) == 0:
-                    return pd.DataFrame()
-
-                kept_columns = ["scan", "precmz", "ms1scan", "rt", "charge"]
-                groupby_columns = ["scan"]
-
-                if "comment" in ms2_df:
-                    groupby_columns.append("comment")
-                    kept_columns.append("comment")
-
-                if "mobility" in ms2_df:
-                    kept_columns.append("mobility")
-
-                result_df = ms2_df.groupby(groupby_columns).first().reset_index()
-                result_df = result_df[kept_columns]
-
-                ms2sum_df = ms2_df.groupby(groupby_columns).sum().reset_index()
-                ms2norm_df = ms2_df.groupby(groupby_columns).max().reset_index()
-
-                result_df["i"] = ms2sum_df["i"]
-                result_df["i_norm"] = ms2norm_df["i_norm"]
-                result_df["mslevel"] = 2
-
-                # Calculating the MS1 i_norm and then joining on the ms1scan
-                try:
-                    ms1norm_df = ms1_df.groupby(groupby_columns).max().reset_index()
-                    ms1norm_df["ms1scan"] = ms1norm_df["scan"]
-                    ms1norm_df["i_norm_ms1"] = ms1norm_df["i_norm"]
-                    ms1norm_df = ms1norm_df[["ms1scan", "i_norm_ms1"]]
-                    result_df = result_df.merge(ms1norm_df, how="left", on="ms1scan")
-                except:
-                    pass
-
-            return result_df
-
-        if parsed_dict["querytype"]["function"] == "functionscanrangesum":
-            result_list = []
-
-            if parsed_dict["querytype"]["datatype"] == "datams1data":
-                ms1_df["bin"] = ms1_df["mz"].apply(lambda x: int(x / 0.1))
-                all_bins = set(ms1_df["bin"])
-
-                for bin in all_bins:
-                    ms1_filtered_df = ms1_df[ms1_df["bin"] == bin]
-                    ms1sum_df = ms1_filtered_df.groupby("scan").sum().reset_index()
-
-                    ms1_filtered_df = (
-                        ms1_filtered_df.groupby("scan").first().reset_index()
-                    )
-                    ms1_filtered_df["i"] = ms1sum_df["i"]
-
-                    result_list.append(ms1_filtered_df)
-
-                return pd.concat(result_list)
-            if parsed_dict["querytype"]["datatype"] == "datams2data":
-                ms2_df = ms2_df.groupby("scan").sum()
-
-                ms2sum_df = ms2_df.groupby("scan").sum()
-                ms2_df = ms2_df.groupby("scan").first().reset_index()
-                ms2_df["i"] = ms2sum_df["i"]
-
-                return ms2_df
-
-        if parsed_dict["querytype"]["function"] == "functionscanmaxint":
-            # This is the biggest peak in the spectrum
-
-            if parsed_dict["querytype"]["datatype"] == "datams1data":
-                if len(ms1_df) == 0:
-                    return ms1_df
-
-                ms1sum_df = ms1_df.groupby("scan").max().reset_index()
-
-                ms1_df = ms1_df.groupby("scan").first().reset_index()
-                ms1_df["i"] = ms1sum_df["i"]
-
-                return ms1_df
-            if parsed_dict["querytype"]["datatype"] == "datams2data":
-                if len(ms2_df) == 0:
-                    return ms2_df
-
-                ms2sum_df = ms2_df.groupby("scan").max().reset_index()
-                
-                ms2_df = ms2_df.groupby("scan").first().reset_index()
-                ms2_df["i"] = ms2sum_df["i"]
-
-                return ms2_df
-
-        print("APPLYING FUNCTION")    
-
-
 # ============================================================
 # Helpers: MGF (MGF / mzML / mzXML) open + align
 # ============================================================
@@ -1165,14 +432,6 @@ def convert_ms1_mgf_to_mzml(mgf_path: str) -> str:
 
     return mzml_path
 
-from types import SimpleNamespace
-
-# Expose the embedded engine under the name `msql_engine`,
-# so the rest of the app keeps working unchanged.
-msql_engine = SimpleNamespace(
-    process_query=process_query
-)
-
 # ============================================================
 # Load logo
 # ============================================================
@@ -1184,8 +443,7 @@ try:
     logo_massQL = Image.open(logo_massQL)
     st.sidebar.image(logo_massQL, use_container_width=True)
 except FileNotFoundError:
-    st.sidebar.warning("Logo_massQL not found at static/LAABio.png")
-
+    st.sidebar.warning("Logo_massQL not found at static/logo_massQL.png")
 
 try:
     logo = Image.open(LOGO_PATH)
@@ -1237,6 +495,139 @@ def parse_compendium(path: str) -> List[Dict[str, str]]:
         i += 1
     return items
 
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+import re
+
+@dataclass
+class MassQLRow:
+    name: str
+    query: str
+    section: Optional[str] = None
+
+SECTION_RE = re.compile(r"^#{3,}\s*(.+?)\s*$")  # e.g. "########### Benzoic Acids"
+
+def parse_massql_compendium_text(text: str) -> Tuple[List[MassQLRow], List[str]]:
+    """
+    Parses a mixed compendium text file like your example:
+    - Ignores blank lines
+    - Tracks section headers like '########### Benzoic Acids'
+    - Extracts rows of the form: <name>\t<query>
+      (split ONLY on the first TAB)
+    Returns (rows, warnings).
+    """
+    rows: List[MassQLRow] = []
+    warnings: List[str] = []
+
+    current_section: Optional[str] = None
+    for i, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+
+        # Section headers and comments
+        m = SECTION_RE.match(line)
+        if m:
+            current_section = m.group(1).strip()
+            continue
+        if line.startswith("#"):
+            continue
+
+        # Must be TSV: name \t query
+        if "\t" not in line:
+            # Some people paste with multiple spaces instead of tabs; you *could* support that,
+            # but better to warn so the file stays consistent.
+            warnings.append(f"Line {i}: no TAB found, skipped -> {raw[:120]}")
+            continue
+
+        name, query = line.split("\t", 1)
+        name = name.strip()
+        query = query.strip()
+
+        if not name or not query:
+            warnings.append(f"Line {i}: empty name or query, skipped")
+            continue
+
+        # Light sanity check (optional)
+        if "QUERY" not in query or "scaninfo" not in query:
+            warnings.append(f"Line {i}: doesn't look like a MassQL query, kept anyway -> {name}")
+
+        rows.append(MassQLRow(name=name, query=query, section=current_section))
+
+    return rows, warnings
+
+def parse_compendium_auto(text: str, fallback_name: str = "UploadedCompendium") -> Tuple[List[Dict[str, str]], List[str]]:
+    """
+    Returns qitems in the SAME schema your runner expects:
+    [{"section": "...", "query": "...", "name": "..."}]
+    """
+    warnings = []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    # Heuristic: TSV format if many non-comment lines contain a TAB
+    non_comment = [ln for ln in lines if not ln.startswith("#")]
+    tab_lines = [ln for ln in non_comment if "\t" in ln]
+
+    is_tsv_style = any(("\tQUERY " in ln.upper()) or ("\tQUERY\t" in ln.upper()) or ("\tQUERY" in ln.upper())
+                   for ln in tab_lines) or (len(tab_lines) >= 1 and len(tab_lines) >= max(1, len(non_comment)//2))
+
+    if is_tsv_style:
+        rows, w = parse_massql_compendium_text(text)
+        warnings.extend(w)
+
+        qitems = []
+        for r in rows:
+            qitems.append({
+                "section": r.section or "UnnamedSection",
+                "query": r.query,
+                "name": r.name,  # keep label if you want later
+            })
+        return qitems, warnings
+
+    # Otherwise assume old style: multi-line QUERY blocks with # sections
+    # We need a text-based version of parse_compendium() (yours is path-based)
+    qitems = []
+    current_section = None
+    i, n = 0, len(lines)
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped.startswith("#"):
+            current_section = stripped.lstrip("#").strip()
+            i += 1
+            continue
+
+        if QUERY_START_RE.match(stripped):
+            buf = [line]
+            i += 1
+            while i < n:
+                nxt = lines[i]
+                nxt_s = nxt.strip()
+                if nxt_s.startswith("#") or QUERY_START_RE.match(nxt_s):
+                    break
+                if nxt_s.startswith("//"):
+                    i += 1
+                    continue
+                buf.append(nxt)
+                i += 1
+
+            qtext = "\n".join(buf).strip()
+            qitems.append({
+                "section": current_section or "UnnamedSection",
+                "query": qtext,
+                "name": fallback_name,
+            })
+            continue
+
+        i += 1
+
+    if not qitems:
+        warnings.append("No queries parsed (file might be empty or in an unexpected format).")
+
+    return qitems, warnings
+
 def _replace_or_append(qtext: str, key: str, value) -> str:
     pat = re.compile(rf"(?i)(:\s*{key}\s*=\s*){_NUM}")
     def _repl(m: re.Match) -> str:
@@ -1274,13 +665,14 @@ def _select_overrides(qualifier_overrides: Dict[str, Dict[str, float]] | None, c
 # ============================================================
 def run_compendiums(
     compendium_files: List[str],
-    mgf_files: List[str],   # continua esse nome para não quebrar chamadas
+    mgf_files: List[str],  # keep this name to avoid breaking callers
     *,
+    parsed_compendia: List[Dict] | None = None,
     use_loader_frames: bool = True,
     parallel: bool = False,
     qualifier_overrides: Dict[str, Dict[str, float]] | None = None,
-    source_name_map: Dict[str, str] | None = None
-) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame], pd.DataFrame]:
+    source_name_map: Dict[str, str] | None = None,
+) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame]:
 
     def _get_ci(d: dict, key: str):
         if not d:
@@ -1294,7 +686,24 @@ def run_compendiums(
                 pass
         return None
 
+    def _disp_name(path: str) -> str:
+        if source_name_map:
+            return source_name_map.get(path, os.path.basename(path))
+        return os.path.basename(path)
+
     all_hits: List[pd.DataFrame] = []
+    query_rows: List[Dict[str, object]] = []
+
+    # ------------------------------------------------------------
+    # Choose compendium iterator:
+    # - If parsed_compendia is provided, it must be:
+    #   [{"comp_name": "...", "qitems": [{"section":..., "query":..., "name":...}, ...]}, ...]
+    # - Else compendium_files is a list of file paths for parse_compendium(path)
+    # ------------------------------------------------------------
+    if parsed_compendia is not None:
+        comp_iter = parsed_compendia
+    else:
+        comp_iter = [{"comp_name": Path(p).stem, "path": p, "qitems": None} for p in compendium_files]
 
     for ms_path in mgf_files:
         ms_path = os.fspath(ms_path)
@@ -1302,7 +711,6 @@ def run_compendiums(
 
         # --- canonical map (scan → precmz / rt / NAME / SPECTRUMID) -------
         ms_rows = []
-        ms_scans_max = 0
         with _open_ms(ms_path) as _rdr_ms_:
             for _i, _spec in enumerate(_rdr_ms_, start=1):
                 _scan, _pepmz, _rtsec = _extract_meta_from_spec(_spec, _i, ext)
@@ -1311,22 +719,18 @@ def run_compendiums(
                 _sid = None
                 if ext == ".mgf":
                     P = _spec.get("params", {}) or {}
-                    _nm  = _get_ci(P, "NAME")
+                    _nm = _get_ci(P, "NAME")
                     _sid = _get_ci(P, "SPECTRUMID")
 
-                ms_rows.append({
-                    "scan": _scan,
-                    "precmz_mgf": _pepmz,
-                    "rt_mgf": _rtsec,
-                    "NAME": _nm,
-                    "SPECTRUMID": _sid,
-                })
-                try:
-                    _scan_int = int(_scan)
-                except Exception:
-                    _scan_int = _i
-                if _scan_int > ms_scans_max:
-                    ms_scans_max = _scan_int
+                ms_rows.append(
+                    {
+                        "scan": _scan,
+                        "precmz_mgf": _pepmz,
+                        "rt_mgf": _rtsec,
+                        "NAME": _nm,
+                        "SPECTRUMID": _sid,
+                    }
+                )
 
         ms_map = pd.DataFrame(ms_rows)
         if not ms_map.empty:
@@ -1344,63 +748,82 @@ def run_compendiums(
                 ms2_df = align_ms2_with_mgf(ms2_df, ms_path)
 
         # --- iterate compendiums/queries ------------------------------------
-        for comp_file in compendium_files:
-            comp_name = Path(comp_file).stem
-            try:
-                qitems = parse_compendium(comp_file)
-            except Exception as e:
-                st.warning(f"[WARN] Failed to parse {comp_file}: {e}")
-                continue
+        for comp_pack in comp_iter:
+            comp_name = comp_pack.get("comp_name") or "UnnamedCompendium"
+
+            # get qitems either from parsed_compendia, or from disk path
+            if comp_pack.get("qitems") is not None:
+                qitems = comp_pack["qitems"]
+            else:
+                comp_file = comp_pack.get("path")
+                if not comp_file:
+                    st.warning(f"[WARN] Missing compendium path for {comp_name}; skipping.")
+                    continue
+                try:
+                    qitems = parse_compendium(comp_file)
+                except Exception as e:
+                    st.warning(f"[WARN] Failed to parse {comp_file}: {e}")
+                    continue
 
             comp_over = _select_overrides(qualifier_overrides, comp_name)
 
             for q_idx, item in enumerate(qitems, start=1):
-                qtext   = item["query"]
-                section = item["section"] or "UnnamedSection"
+                qtext = item.get("query", "")
+                section = item.get("section") or "UnnamedSection"
                 if comp_over:
                     qtext = apply_qualifier_overrides(qtext, comp_over)
 
-                # ------------------------------------------------------------
-                # PATCH: suporte a OR entre MS2PROD e MS2NL
-                # Lógica:
-                #   Se o texto do query contém MS2PROD, MS2NL e " OR ",
-                #   tentamos reescrever:
-                #       ... AND (MS2PROD ... OR MS2NL ...)
-                #   em dois queries independentes:
-                #       Q_prod: ... AND MS2PROD ...
-                #       Q_nl  : ... AND MS2NL  ...
-                #   Rodamos ambos e fazemos a UNIÃO dos resultados.
-                # ------------------------------------------------------------
+                base_query_label = f"{comp_name} :: {section} :: #{q_idx}"
+
+                # default registry row template
+                base_row = {
+                    "source_file": _disp_name(ms_path),
+                    "ms_path": ms_path,
+                    "compendium": comp_name,
+                    "section": section,
+                    "query_idx": q_idx,
+                }
+
                 try:
                     upper_q = qtext.upper()
-                    use_or_patch = (
-                        " OR " in upper_q and
-                        "MS2PROD" in upper_q and
-                        "MS2NL" in upper_q
-                    )
+                    use_or_patch = (" OR " in upper_q and "MS2PROD" in upper_q and "MS2NL" in upper_q)
 
+                    # --------------------------------------------------------
+                    # OR patch: split MS2PROD ... OR MS2NL ... into two queries
+                    # --------------------------------------------------------
                     if use_or_patch:
-                        # Procurar explicitamente o padrão "MS2PROD ... OR MS2NL ..."
                         m = re.search(
-                            r'(MS2PROD[\s\S]*?)\s+OR\s+(MS2NL[\s\S]*?)(?=AND|$)',
+                            r"(MS2PROD[\s\S]*?)\s+OR\s+(MS2NL[\s\S]*?)(?=(?:AND|\)|$))",
                             qtext,
-                            flags=re.IGNORECASE
+                            flags=re.IGNORECASE,
                         )
 
                         if m:
                             part_prod = m.group(1)
-                            part_nl   = m.group(2)
+                            part_nl = m.group(2)
+                            prefix = qtext[: m.start()]
+                            suffix = qtext[m.end() :]
 
-                            prefix = qtext[:m.start()]
-                            suffix = qtext[m.end():]
+                            q_prod = (prefix + part_prod + suffix).replace("WHERE WHERE", "WHERE")
+                            q_nl = (prefix + part_nl + suffix).replace("WHERE WHERE", "WHERE")
 
-                            q_prod = prefix + part_prod + suffix
-                            q_nl   = prefix + part_nl   + suffix
+                            executed_subqueries: List[Tuple[str, str]] = [
+                                (f"{base_query_label} [MS2PROD]", q_prod),
+                                (f"{base_query_label} [MS2NL]", q_nl),
+                            ]
 
                             sub_results: List[pd.DataFrame] = []
-                            for subq in (q_prod, q_nl):
-                                # sanity: evitar "WHERE WHERE"
-                                subq = subq.replace("WHERE WHERE", "WHERE")
+
+                            for sub_label, subq in executed_subqueries:
+                                query_rows.append(
+                                    {
+                                        **base_row,
+                                        "query_label": sub_label,
+                                        "query_text": subq,
+                                        "or_patch": True,
+                                    }
+                                )
+
                                 try:
                                     r = msql_engine.process_query(
                                         subq,
@@ -1408,51 +831,115 @@ def run_compendiums(
                                         ms1_df=ms1_df,
                                         ms2_df=ms2_df,
                                         cache=True,
-                                        parallel=parallel
-                                    )
-                                    if r is not None and len(r) > 0:
-                                        sub_results.append(r)
-                                except Exception as e_sub:
-                                    st.info(
-                                        f"[INFO] Sub-query failed "
-                                        f"({comp_name} :: {section} #{q_idx}): {e_sub}"
+                                        parallel=parallel,
                                     )
 
-                            if sub_results:
-                                res = pd.concat(sub_results, ignore_index=True).drop_duplicates()
-                            else:
-                                res = pd.DataFrame()
+                                    nh = int(len(r)) if isinstance(r, pd.DataFrame) else 0
+                                    query_rows[-1]["status"] = "ok"
+                                    query_rows[-1]["n_hits"] = nh
+
+                                    if r is not None and nh > 0:
+                                        r = r.copy()
+                                        r["query_label"] = sub_label
+                                        r["query_text"] = subq
+                                        sub_results.append(r)
+
+                                except Exception as e_sub:
+                                    query_rows[-1]["status"] = "error"
+                                    query_rows[-1]["error"] = str(e_sub)
+                                    query_rows[-1]["n_hits"] = 0
+
+                            res = (
+                                pd.concat(sub_results, ignore_index=True).drop_duplicates()
+                                if sub_results
+                                else pd.DataFrame()
+                            )
 
                         else:
-                            # Se o padrão não for encontrado, cai de volta no comportamento padrão
+                            # OR patch expected but pattern not found; run original query once
+                            query_rows.append(
+                                {
+                                    **base_row,
+                                    "query_label": base_query_label,
+                                    "query_text": qtext,
+                                    "or_patch": False,
+                                }
+                            )
+
+                            try:
+                                res = msql_engine.process_query(
+                                    qtext,
+                                    ms_path,
+                                    ms1_df=ms1_df,
+                                    ms2_df=ms2_df,
+                                    cache=True,
+                                    parallel=parallel,
+                                )
+                                nh = int(len(res)) if isinstance(res, pd.DataFrame) else 0
+                                query_rows[-1]["status"] = "ok"
+                                query_rows[-1]["n_hits"] = nh
+                            except Exception as e_one:
+                                query_rows[-1]["status"] = "error"
+                                query_rows[-1]["error"] = str(e_one)
+                                query_rows[-1]["n_hits"] = 0
+                                res = pd.DataFrame()
+
+                    # --------------------------------------------------------
+                    # Normal query (single execution)
+                    # --------------------------------------------------------
+                    else:
+                        query_rows.append(
+                            {
+                                **base_row,
+                                "query_label": base_query_label,
+                                "query_text": qtext,
+                                "or_patch": False,
+                            }
+                        )
+
+                        try:
                             res = msql_engine.process_query(
                                 qtext,
                                 ms_path,
                                 ms1_df=ms1_df,
                                 ms2_df=ms2_df,
                                 cache=True,
-                                parallel=parallel
+                                parallel=parallel,
                             )
-                    else:
-                        # Query sem OR problemático → MassQL normal
-                        res = msql_engine.process_query(
-                            qtext,
-                            ms_path,
-                            ms1_df=ms1_df,
-                            ms2_df=ms2_df,
-                            cache=True,
-                            parallel=parallel
-                        )
+                            nh = int(len(res)) if isinstance(res, pd.DataFrame) else 0
+                            query_rows[-1]["status"] = "ok"
+                            query_rows[-1]["n_hits"] = nh
+                        except Exception as e_one:
+                            query_rows[-1]["status"] = "error"
+                            query_rows[-1]["error"] = str(e_one)
+                            query_rows[-1]["n_hits"] = 0
+                            res = pd.DataFrame()
 
                 except Exception as e:
-                    st.info(f"[INFO] Query failed ({comp_name} :: {section} #{q_idx}) on {os.path.basename(ms_path)}: {e}")
-                    continue
-
-                if res is None or len(res) == 0:
+                    # unexpected wrapper error (should be rare)
+                    query_rows.append(
+                        {
+                            **base_row,
+                            "query_label": base_query_label,
+                            "query_text": qtext,
+                            "or_patch": False,
+                            "status": "error",
+                            "error": str(e),
+                            "n_hits": 0,
+                        }
+                    )
                     continue
 
                 # --- normalize schema ---------------------------------------
+                if res is None or not isinstance(res, pd.DataFrame) or res.empty:
+                    continue
                 res = res.copy()
+
+                # ensure query_label/query_text present in result rows
+                if "query_label" not in res.columns:
+                    res["query_label"] = base_query_label
+                if "query_text" not in res.columns:
+                    res["query_text"] = qtext
 
                 # unify scan column
                 scan_variants = [c for c in res.columns if str(c).lower() in ("scan", "scans")]
@@ -1470,11 +957,11 @@ def run_compendiums(
                     if col not in res.columns:
                         res[col] = pd.NA
 
-                res["compendium"]  = comp_name if res["compendium"].isna().all() else res["compendium"]
-                res["section"]     = section   if res["section"].isna().all()     else res["section"]
-                res["query_idx"]   = q_idx     if res["query_idx"].isna().all()   else res["query_idx"]
+                res["compendium"] = comp_name if res["compendium"].isna().all() else res["compendium"]
+                res["section"] = section if res["section"].isna().all() else res["section"]
+                res["query_idx"] = q_idx if res["query_idx"].isna().all() else res["query_idx"]
 
-                disp = source_name_map.get(ms_path, os.path.basename(ms_path)) if source_name_map else os.path.basename(ms_path)
+                disp = _disp_name(ms_path)
                 res["source_file"] = disp if res["source_file"].isna().all() else res["source_file"]
 
                 # uppercase fallbacks
@@ -1484,7 +971,6 @@ def run_compendiums(
 
                 if "scan" in res.columns:
                     res["scan"] = pd.to_numeric(res["scan"], errors="coerce")
-
                 for c in ("precmz", "rt"):
                     if c in res.columns:
                         res[c] = pd.to_numeric(res[c], errors="coerce")
@@ -1505,34 +991,53 @@ def run_compendiums(
 
                     res = res.drop(columns=["precmz_mgf", "rt_mgf"], errors="ignore")
 
-                # optional diagnostic
-                sc_col = "scan" if "scan" in res.columns else None
-                if sc_col is not None:
-                    _res_sc = pd.to_numeric(res[sc_col], errors="coerce").dropna()
-                    if not _res_sc.empty and ms_scans_max > 0 and _res_sc.max() < ms_scans_max:
-                        # aqui poderíamos logar algo se fosse necessário
-                        pass
-
                 all_hits.append(res)
 
-    if not all_hits:
-        empty = pd.DataFrame(columns=[
-            "scan","precmz","rt","compendium","section","query_idx","source_file","NAME","SPECTRUMID"
-        ])
-        return empty, {}, empty
+    # -----------------------------
+    # Build query registry dataframe
+    # -----------------------------
+    query_registry = pd.DataFrame(query_rows)
+    if not query_registry.empty:
+        for c in ("status", "error", "n_hits", "or_patch"):
+            if c not in query_registry.columns:
+                query_registry[c] = pd.NA
 
+    # -----------------------------
+    # If no hits at all
+    # -----------------------------
+    if not all_hits:
+        empty = pd.DataFrame(
+            columns=[
+                "scan",
+                "precmz",
+                "rt",
+                "compendium",
+                "section",
+                "query_idx",
+                "source_file",
+                "NAME",
+                "SPECTRUMID",
+                "query_label",
+                "query_text",
+            ]
+        )
+        return empty, {}, empty, query_registry
+
+    # -----------------------------
+    # Combine + dedupe
+    # -----------------------------
     combined = pd.concat(all_hits, ignore_index=True)
 
-    dedup_keys = ["source_file","compendium","section","query_idx","scan"]
+    dedup_keys = ["source_file", "compendium", "section", "query_idx", "query_label", "scan"]
     for k in dedup_keys:
         if k not in combined.columns:
             combined[k] = pd.NA
-    combined_unique = (
-        combined
-        .drop_duplicates(subset=dedup_keys)
-        .reset_index(drop=True)
-    )
 
+    combined_unique = combined.drop_duplicates(subset=dedup_keys).reset_index(drop=True)
+
+    # -----------------------------
+    # Presence matrices
+    # -----------------------------
     presence_global = pd.DataFrame()
     presence_by_comp: Dict[str, pd.DataFrame] = {}
 
@@ -1542,21 +1047,21 @@ def run_compendiums(
     if need_cols.issubset(have_cols):
         dfp = combined_unique.copy()
         dfp["source_file"] = dfp["source_file"].astype(str)
-        dfp["scan"]        = pd.to_numeric(dfp["scan"], errors="coerce")
-        dfp["compendium"]  = dfp["compendium"].astype(str)
-        dfp["section"]     = dfp["section"].astype(str)
-        dfp = dfp.dropna(subset=["source_file","scan","compendium","section"])
+        dfp["scan"] = pd.to_numeric(dfp["scan"], errors="coerce")
+        dfp["compendium"] = dfp["compendium"].astype(str)
+        dfp["section"] = dfp["section"].astype(str)
+        dfp = dfp.dropna(subset=["source_file", "scan", "compendium", "section"])
 
         if not dfp.empty:
             dfp["hit"] = 1
 
             presence_global = (
                 dfp.pivot_table(
-                    index=["source_file","scan"],
-                    columns=["compendium","section"],
+                    index=["source_file", "scan"],
+                    columns=["compendium", "section"],
                     values="hit",
                     aggfunc="max",
-                    fill_value=0
+                    fill_value=0,
                 )
                 .sort_index()
             )
@@ -1567,19 +1072,17 @@ def run_compendiums(
                     continue
                 pres = (
                     sub.pivot_table(
-                        index=["source_file","scan"],
+                        index=["source_file", "scan"],
                         columns="section",
                         values="hit",
                         aggfunc="max",
-                        fill_value=0
+                        fill_value=0,
                     )
                     .sort_index()
                 )
                 presence_by_comp[comp] = pres
 
-    return combined_unique, presence_by_comp, presence_global
-
-
+    return combined_unique, presence_by_comp, presence_global, query_registry
 
 # ============================================================
 # Pretty summaries + presence tables
@@ -1787,40 +1290,46 @@ st.caption("Upload an MS file (.mgf, .mzML, .mzXML) and one or more MassQL compe
 
 with st.sidebar:
     st.header("1) Inputs")
+
     up_ms_files = st.file_uploader(
-        "MS files (.mgf / .mzML / .mzXML)",
-        help=".mgf files exported using 'Export Scans' and selecting MS1 data can be used.",
+        "MS file(s) (.mgf, .mzML, .mzXML)",
         type=["mgf", "mzml", "mzxml"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        help="Upload one or more MS files. For MGF, scans are forced to 1..N.",
     )
-    # NEW: option to convert MS1-only MGF to mzML
+
+    up_comps = st.file_uploader(
+        "Compendium files (txt/tsv) — supports QUERY-block and name<TAB>QUERY formats",
+        type=["txt", "tsv", "tab", "csv"],
+        accept_multiple_files=True,
+        help="Either: (A) multi-line blocks starting with QUERY, or (B) TSV lines: name<TAB>QUERY ...",
+    )
+
+    preview_compendia = st.checkbox("Preview parsed compendia on upload", value=False)
+
     convert_ms1_mgf_flag = st.checkbox(
         "Convert MS1-only MGF to mzML for MS1 queries",
         value=False,
         help="If checked, any uploaded .mgf file will be converted to a simple MS1 mzML before running MassQL."
     )
 
-    up_comps = st.file_uploader(
-        "Compendium .txt files (multiple)",
-        type=["txt"],
-        accept_multiple_files=True,
-        help=".txt file with separate MassQL queries.",
-    )
-
     st.header("2) Qualifier overrides (applied to all)")
     colA, colB, colC = st.columns(3)
     with colA:
-        tol_mz = st.number_input("TOLERANCEMZ", value=0.03, step=0.01, format="%.4f")
+        tol_mz = st.text_input("TOLERANCEMZ override (blank = keep query value)", value="")
     with colB:
-        tol_ppm = st.text_input("TOLERANCEPPM (blank = ignore)", value="")
+        tol_ppm = st.text_input("TOLERANCEPPM override (blank = keep query value)", value="")
     with colC:
-        inten_pct = st.number_input("INTENSITYPERCENT", value=10, step=1)
+        inten_pct = st.text_input("INTENSITYPERCENT override (blank = keep query value)", value="")
 
     st.markdown("You can also add **per-compendium** overrides by name below (JSON). Example:")
-    st.code('''{
+    st.code(
+        '''{
   "*": {"TOLERANCEMZ": 0.03, "INTENSITYPERCENT": 10},
   "Flavonoids": {"TOLERANCEMZ": 0.02}
-}''', language="json")
+}''',
+        language="json",
+    )
     per_comp_json = st.text_area("Overrides JSON (optional)", value="", height=120)
 
     run_btn = st.button("Run MassQL Compendiums", type="primary")
@@ -1865,133 +1374,158 @@ if "combined" not in state:
     state.source_name_map = {}   # dict[path] -> display name
     state.last_comp_paths = []   # compendium file paths
 
+if "query_registry" not in state:
+    state.query_registry = pd.DataFrame()
+
+def _to_float_or_none(s: str):
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+def _build_qualifier_overrides(global_inputs: dict, per_comp_text: str) -> dict | None:
+    """
+    Returns dict like:
+    {
+      "*": {"TOLERANCEMZ": 0.02, "TOLERANCEPPM": 10, "INTENSITYPERCENT": 5},
+      "Flavonoids": {"TOLERANCEMZ": 0.01}
+    }
+    """
+    base = {k: v for k, v in global_inputs.items() if v is not None}
+    out = {"*": base} if base else {}
+
+    per_comp_text = (per_comp_text or "").strip()
+    if per_comp_text:
+        try:
+            obj = json.loads(per_comp_text)
+            if isinstance(obj, dict):
+                # shallow-merge user json (expects already correct structure)
+                for k, v in obj.items():
+                    if isinstance(v, dict):
+                        out[k] = {kk: vv for kk, vv in v.items() if vv is not None}
+        except Exception as e:
+            st.warning(f"Overrides JSON could not be parsed. Ignoring. Error: {e}")
+
+    return out if out else None
+
 
 if run_btn:
-    if not up_ms_files or not up_comps:
-        st.error("Please upload at least one MS file and one compendium .txt.")
-    else:
-        # Persist MS uploads
-        ms_paths, ms_displays = [], []
-        for f in up_ms_files:
-            p, n = _persist_upload(f)
-            ms_paths.append(p)
-            ms_displays.append(n)
+    if (not up_ms_files) or (not up_comps):
+        st.error("Please upload at least one MS file and one compendium file.")
+        st.stop()
 
-        # Persist compendiums
-        comp_paths, comp_names = [], []
-        for f in up_comps:
-            p, n = _persist_upload(f)
-            comp_paths.append(p)
-            comp_names.append(n)
-            
-        # Optionally convert MS1-only MGF → mzML for MassQL MS1 queries
-        converted_files = []  # list of (display_name, converted_path)
-        ms_paths_effective = []
+    # -----------------------------
+    # Qualifier overrides
+    # -----------------------------
+    global_overrides = {
+        "TOLERANCEMZ": _to_float_or_none(tol_mz),
+        "TOLERANCEPPM": _to_float_or_none(tol_ppm),
+        "INTENSITYPERCENT": _to_float_or_none(inten_pct),
+    }
+    qualifier_overrides = _build_qualifier_overrides(global_overrides, per_comp_json)
 
-        for p, disp in zip(ms_paths, ms_displays):
-            ext = Path(p).suffix.lower()
-            if convert_ms1_mgf_flag and ext == ".mgf":
-                try:
-                    mzml_p = convert_ms1_mgf_to_mzml(p)
+    # -----------------------------
+    # Persist MS uploads
+    # -----------------------------
+    ms_paths: list[str] = []
+    ms_displays: list[str] = []
+    source_name_map: dict[str, str] = {}
 
-                    # Only treat as "converted" if we actually got a new mzML file
-                    if Path(mzml_p).suffix.lower() == ".mzml" and mzml_p != p:
-                        ms_paths_effective.append(mzml_p)
-                        converted_files.append((disp, mzml_p))
-                        st.info(
-                            f"Converted MS1 MGF → mzML for {disp} → {os.path.basename(mzml_p)}"
-                        )
-                    else:
-                        ms_paths_effective.append(p)
-                        st.warning(
-                            f"MGF→mzML conversion skipped for {disp}: "
-                            "no spectra found or conversion did not produce a new mzML file."
-                        )
-                except Exception as e:
-                    ms_paths_effective.append(p)
-                    st.warning(
-                        f"MGF→mzML conversion failed for {disp}; using original MGF. "
-                        f"Error: {e}"
-                    )
+    for f in up_ms_files:
+        p, n = _persist_upload(f)
+        if p is None:
+            continue
+        ms_paths.append(p)
+        ms_displays.append(n)
+        source_name_map[p] = n  # real path -> display name
+
+    # Optional: convert MS1-only MGF → mzML for MS1 queries
+    # (NOTE: your converter converts *every* MGF; if you only want MS1-only,
+    # you'll need a detector. For now we respect your checkbox literally.)
+    if convert_ms1_mgf_flag:
+        new_paths = []
+        new_map = {}
+        for p in ms_paths:
+            if Path(p).suffix.lower() == ".mgf":
+                conv = convert_ms1_mgf_to_mzml(p)
+                new_paths.append(conv)
+                # keep same display name but reflect conversion
+                disp = source_name_map.get(p, os.path.basename(p))
+                new_map[conv] = disp.replace(".mgf", "") + " (converted mzML)"
             else:
-                ms_paths_effective.append(p)
+                new_paths.append(p)
+                new_map[p] = source_name_map.get(p, os.path.basename(p))
+        ms_paths = new_paths
+        source_name_map = new_map
 
+    # -----------------------------
+    # Persist + parse compendiums
+    # -----------------------------
+    comp_paths: list[str] = []
+    parsed_compendia: list[dict] = []  # [{"comp_name": str, "qitems": [...], "warnings": [...]}]
 
+    for f in up_comps:
+        comp_p, comp_disp = _persist_upload(f)
+        if comp_p is None:
+            continue
 
-        # Build overrides
-        overrides = {"*": {"TOLERANCEMZ": float(tol_mz), "INTENSITYPERCENT": int(inten_pct)}}
-        if tol_ppm.strip():
-            try:
-                overrides["*"]["TOLERANCEPPM"] = float(tol_ppm)
-            except:
-                st.warning("TOLERANCEPPM not a number; ignoring.")
+        comp_paths.append(comp_p)
 
-        if per_comp_json.strip():
-            try:
-                user_json = json.loads(per_comp_json)
-                for k, v in user_json.items():
-                    overrides[k] = {**overrides.get(k, {}), **v}
-            except Exception as e:
-                st.warning(f"Invalid JSON for per-compendium overrides: {e}")
+        raw = Path(comp_p).read_text(encoding="utf-8", errors="replace")
+        comp_name = Path(comp_disp).stem
 
-        ## Map: full path -> human display name (using effective paths!)
-        source_name_map = {p: (d or os.path.basename(p)) for p, d in zip(ms_paths_effective, ms_displays)}
+        qitems, warns = parse_compendium_auto(raw, fallback_name=comp_name)
+        parsed_compendia.append({"comp_name": comp_name, "qitems": qitems, "warnings": warns})
 
-        with st.spinner("Running MassQL queries..."):
-            combined, presence_by_comp, presence_global = run_compendiums(
-                compendium_files=comp_paths,
-                mgf_files=ms_paths_effective,  # <<< use effective paths here
-                use_loader_frames=True,
-                parallel=False,
-                qualifier_overrides=overrides,
-                source_name_map=source_name_map
-            )
+    # -----------------------------
+    # Optional preview
+    # -----------------------------
+    if preview_compendia:
+        for pack in parsed_compendia:
+            st.write(f"**{pack['comp_name']}** — queries parsed: {len(pack['qitems'])}")
+            if pack.get("warnings"):
+                st.warning("\n".join(pack["warnings"][:10]))
 
-        # Build one scan index per MS file for the viewer
-        ms_indexes = {p: _build_ms_scan_index(p) for p in ms_paths_effective}
+    # -----------------------------
+    # Run MassQL
+    # -----------------------------
+    with st.spinner("Running MassQL compendiums..."):
+        combined_unique, presence_by_comp, presence_global, query_registry = run_compendiums(
+            compendium_files=comp_paths,
+            mgf_files=ms_paths,
+            parsed_compendia=[{"comp_name": p["comp_name"], "qitems": p["qitems"]} for p in parsed_compendia],
+            use_loader_frames=True,
+            parallel=False,
+            qualifier_overrides=qualifier_overrides,
+            source_name_map=source_name_map,
+        )
 
-        # Save in state
-        state.combined = combined
-        state.presence_by_comp = presence_by_comp
-        state.presence_global = presence_global
-        state.ms_paths = ms_paths_effective
-        state.ms_indexes = ms_indexes
-        state.source_name_map = source_name_map
-        state.last_comp_paths = comp_paths
+    # -----------------------------
+    # Build MS indexes for viewer
+    # -----------------------------
+    ms_indexes = {}
+    for p in ms_paths:
+        try:
+            ms_indexes[p] = _build_ms_scan_index(p)
+        except Exception as e:
+            st.warning(f"[WARN] Could not index MS file {os.path.basename(p)}: {e}")
+            ms_indexes[p] = {}
 
-        st.success("Done.")
+    # -----------------------------
+    # Persist to session state
+    # -----------------------------
+    state.combined = combined_unique
+    state.presence_by_comp = presence_by_comp
+    state.presence_global = presence_global
+    state.query_registry = query_registry
 
-        # Let the user download any converted mzML files
-        if converted_files:
-            st.markdown("### Download converted mzML files")
-            for disp, mzml_p in converted_files:
-                label = f"Download {Path(disp).stem}__converted_ms1.mzML"
-                with open(mzml_p, "rb") as fh:
-                    st.download_button(
-                        label=label,
-                        data=fh.read(),
-                        file_name=os.path.basename(mzml_p),
-                        mime="application/octet-stream",
-                        key=f"dl_{os.path.basename(mzml_p)}",
-                    )
-
-        # ---------- DIAGNOSTICS if nothing came back ----------
-        if state.combined is None or state.combined.empty:
-            with st.expander("Diagnostics (why are there no results?)", expanded=True):
-                st.warning("No MassQL hits were returned. Here are some checks:")
-                # just run diagnostics on the first MS file for now
-                first_ms = state.ms_paths[0] if state.ms_paths else None
-                diag = diagnostics_check(first_ms, state.last_comp_paths) if first_ms else pd.DataFrame()
-                if not diag.empty:
-                    st.markdown(html_table(diag, 200), unsafe_allow_html=True)
-
-                if first_ms:
-                    ok, msg = smoke_test_massql(first_ms)
-                    if ok:
-                        st.success(f"MassQL smoke test: OK — {msg}")
-                    else:
-                        st.error(f"MassQL smoke test failed — {msg}")
-                st.caption("Tip: verify your compendium files contain lines starting with `QUERY`, and that tolerances aren’t too strict.")
+    state.ms_paths = ms_paths
+    state.ms_indexes = ms_indexes
+    state.source_name_map = source_name_map
+    state.last_comp_paths = comp_paths
 
 
 # ============================================================
@@ -2003,120 +1537,254 @@ presence_global = state.presence_global
 ms_indexes = getattr(state, "ms_indexes", {})
 source_name_map = getattr(state, "source_name_map", {})
 
-if not combined.empty:
+
+st.markdown("---")
+st.subheader("Queries executed (even with zero matches)")
+
+qr = getattr(state, "query_registry", pd.DataFrame())
+if qr is None or qr.empty:
+    st.info("No query registry available yet. Run the compendiums first.")
+else:
+    # filters
+    f1, f2, f3 = st.columns([2, 2, 2])
+    with f1:
+        src_opts = ["(all)"] + sorted(qr["source_file"].astype(str).unique().tolist())
+        src_pick = st.selectbox("Source file", src_opts, index=0)
+    with f2:
+        comp_opts = ["(all)"] + sorted(qr["compendium"].astype(str).unique().tolist())
+        comp_pick = st.selectbox("Compendium", comp_opts, index=0)
+    with f3:
+        status_opts = ["(all)"] + sorted(qr["status"].astype(str).fillna("ok").unique().tolist())
+        status_pick = st.selectbox("Status", status_opts, index=0)
+
+    qrf = qr.copy()
+    if src_pick != "(all)":
+        qrf = qrf[qrf["source_file"].astype(str) == src_pick]
+    if comp_pick != "(all)":
+        qrf = qrf[qrf["compendium"].astype(str) == comp_pick]
+    if status_pick != "(all)":
+        qrf = qrf[qrf["status"].astype(str) == status_pick]
+
+    # table + download
+    show_cols = [c for c in ["source_file","compendium","section","query_idx","query_label","or_patch","status","n_hits","error"] if c in qrf.columns]
+    st.markdown(html_table(qrf[show_cols], 300), unsafe_allow_html=True)
+    st.download_button(
+        "Download query_registry.csv",
+        data=download_csv_bytes(qrf),
+        file_name="query_registry.csv"
+    )
+
+    # show exact query text
+    if not qrf.empty and {"query_label","query_text"}.issubset(qrf.columns):
+        lab = st.selectbox("Show query text", qrf["query_label"].astype(str).tolist(), index=0, key="qry_show")
+        txt = qrf.loc[qrf["query_label"].astype(str) == str(lab), "query_text"].iloc[0]
+        st.code(txt, language="text")
+        st.download_button(
+            "Download shown_query.txt",
+            data=txt.encode("utf-8"),
+            file_name=f"{_safe_col(str(lab))}.txt",
+            mime="text/plain",
+            key="dl_shown_query"
+        )
+
+if combined is None or combined.empty:
+    st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
+else:
+    # -------------------------
+    # Summary
+    # -------------------------
     st.subheader("Summary")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("Total result rows", f"{len(combined):,}")
     with c2:
-        st.metric("Unique scans (hits)", f"{combined['scan'].nunique() if 'scan' in combined.columns else 0:,}")
+        st.metric(
+            "Unique scans (hits)",
+            f"{combined['scan'].nunique() if 'scan' in combined.columns else 0:,}",
+        )
     with c3:
-        st.metric("Compendiums", f"{combined['compendium'].nunique():,}")
+        st.metric("Compendiums", f"{combined['compendium'].nunique() if 'compendium' in combined.columns else 0:,}")
     with c4:
-        st.metric("Sections", f"{combined['section'].nunique():,}")
+        st.metric("Sections", f"{combined['section'].nunique() if 'section' in combined.columns else 0:,}")
 
+    # -------------------------
+    # Presence matrices
+    # -------------------------
     st.markdown("---")
     st.markdown("### Global presence (compendium × section)")
-    if not presence_global.empty:
-        # Flatten MultiIndex columns to strings
+    if presence_global is not None and not presence_global.empty:
         pg = presence_global.copy()
+        # Flatten MultiIndex columns to strings: "Compendium :: Section"
         pg.columns = [f"{c[0]} :: {c[1]}" for c in pg.columns.to_list()]
         pg = pg.reset_index()
+
         st.markdown(html_table(pg, 200), unsafe_allow_html=True)
-        st.download_button("Download presence_global.csv",
-                           data=download_csv_bytes(pg), file_name="presence_global.csv")
+        st.download_button(
+            "Download presence_global.csv",
+            data=download_csv_bytes(pg),
+            file_name="presence_global.csv",
+        )
     else:
         st.info("No global presence matrix.")
 
     st.markdown("---")
     st.markdown("### Presence by compendium")
-    for comp, pres in presence_by_comp.items():
-        st.markdown(f"**{comp}**")
-        pres2 = pres.reset_index()
-        st.markdown(html_table(pres2, 150), unsafe_allow_html=True)
-        st.download_button(f"Download presence_{_safe_col(comp)}.csv",
-                           data=download_csv_bytes(pres2),
-                           file_name=f"presence_{_safe_col(comp)}.csv")
+    if presence_by_comp:
+        for comp, pres in presence_by_comp.items():
+            st.markdown(f"**{comp}**")
+            pres2 = pres.reset_index()
+            st.markdown(html_table(pres2, 150), unsafe_allow_html=True)
+            st.download_button(
+                f"Download presence_{_safe_col(comp)}.csv",
+                data=download_csv_bytes(pres2),
+                file_name=f"presence_{_safe_col(comp)}.csv",
+            )
+    else:
+        st.info("No per-compendium presence matrices.")
 
     st.markdown("---")
     st.markdown("### Named presence table (compendium and section labels in cells)")
     named = make_named_presence_table(combined)
     st.markdown(html_table(named, 200), unsafe_allow_html=True)
-    st.download_button("Download combined_wide.csv",
-                       data=download_csv_bytes(named), file_name="combined_wide.csv")
+    st.download_button(
+        "Download combined_wide.csv",
+        data=download_csv_bytes(named),
+        file_name="combined_wide.csv",
+    )
 
     st.markdown("---")
     st.markdown("### Coverage by compendium")
     cov = coverage_by_compendium(combined)
     st.markdown(html_table(cov, 200), unsafe_allow_html=True)
-    st.download_button("Download coverage.csv", data=download_csv_bytes(cov), file_name="coverage.csv")
+    st.download_button(
+        "Download coverage.csv",
+        data=download_csv_bytes(cov),
+        file_name="coverage.csv",
+    )
 
     # ===================== MS/MS viewer =====================
     st.markdown("---")
     st.subheader("Interactive MS/MS viewer (mpld3)")
 
-    # 1) Choose which MS file (by display name = source_file)
-    # combined["source_file"] already stores display names from source_name_map
-    sources = sorted(combined["source_file"].astype(str).unique())
-    if not sources:
-        st.info("No sources available for MS/MS viewer.")
+    if "source_file" not in combined.columns:
+        st.warning("Column 'source_file' is missing from results; cannot build MS/MS viewer.")
     else:
-        col_src, col_opts = st.columns([2, 3])
-        with col_src:
-            chosen_source = st.selectbox("Source file", sources, index=0)
-
-        # map display name -> real path
-        name_to_path = {v: k for k, v in source_name_map.items()}
-        ms_path = name_to_path.get(chosen_source)
-        mgf_index = ms_indexes.get(ms_path, {}) if ms_path else {}
-
-        # 2) Scans: prefer those with MassQL hits for this source
-        df_src = combined[combined["source_file"] == chosen_source].copy()
-        if "scan" in df_src.columns:
-            scans = sorted(
-                map(int, pd.to_numeric(df_src["scan"], errors="coerce").dropna().unique())
-            )
+        # 1) Choose MS file (display name = source_file)
+        sources = sorted(combined["source_file"].astype(str).dropna().unique().tolist())
+        if not sources:
+            st.info("No sources available for MS/MS viewer.")
         else:
-            scans = []
+            col_src, col_opts = st.columns([2, 3])
+            with col_src:
+                chosen_source = st.selectbox("Source file", sources, index=0)
 
-        # Fallback: if no hit scans, use all scans from that file index
-        if not scans and mgf_index:
-            scans = sorted(mgf_index.keys())
+            # map display name -> real path
+            name_to_path = {v: k for k, v in source_name_map.items()}
+            ms_path = name_to_path.get(chosen_source)
+            mgf_index = ms_indexes.get(ms_path, {}) if ms_path else {}
 
-        if scans:
-            with col_opts:
-                chosen_scan = st.selectbox("Scan", scans, index=0)
-                normalize = st.checkbox("Normalize to 100%", value=True)
-                topn = st.slider("Annotate top-N peaks", min_value=0, max_value=40, value=12, step=1)
+            # 2) Scans: prefer scans with hits for this source
+            df_src = combined.loc[combined["source_file"].astype(str) == str(chosen_source)].copy()
 
-            if mgf_index:
-                html = _plot_ms2_html_from_index(mgf_index, int(chosen_scan),
-                                                 normalize=normalize, annotate_top_n=topn)
-                components.html(html, height=420, scrolling=True)
+            scans: list[int] = []
+            if "scan" in df_src.columns:
+                scans = sorted(
+                    map(int, pd.to_numeric(df_src["scan"], errors="coerce").dropna().unique())
+                )
+
+            # Fallback: if no hit scans, use all scans from that file index
+            if not scans and mgf_index:
+                scans = sorted(map(int, mgf_index.keys()))
+
+            if not scans:
+                st.info("No scans available to display for this file.")
             else:
-                st.warning("MS index not available to render spectrum for this file.")
+                with col_opts:
+                    chosen_scan = st.selectbox("Scan", scans, index=0)
+                    normalize = st.checkbox("Normalize to 100%", value=True)
+                    topn = st.slider(
+                        "Annotate top-N peaks",
+                        min_value=0,
+                        max_value=40,
+                        value=12,
+                        step=1,
+                    )
 
-            # Per-scan MassQL hits table, filtered by BOTH source_file and scan
-            st.markdown("**MassQL hits for selected scan**")
-            dfscan = df_src.copy()
-            if "scan" in dfscan.columns:
-                dfscan = dfscan[pd.to_numeric(dfscan["scan"], errors="coerce") == int(chosen_scan)]
-                keep_base = ["source_file","scan","precmz","rt","compendium","section","query_idx"]
-                keep_extra = [c for c in ("NAME","SPECTRUMID") if c in dfscan.columns]
+                # Plot spectrum
+                if mgf_index:
+                    html = _plot_ms2_html_from_index(
+                        mgf_index,
+                        int(chosen_scan),
+                        normalize=normalize,
+                        annotate_top_n=topn,
+                    )
+                    components.html(html, height=420, scrolling=True)
+                else:
+                    st.warning("MS index not available to render spectrum for this file.")
+
+                # -------------------------
+                # Per-scan MassQL hits
+                # -------------------------
+                st.markdown("**MassQL hits for selected scan**")
+
+                dfscan = df_src.copy()
+                if "scan" in dfscan.columns:
+                    dfscan = dfscan[pd.to_numeric(dfscan["scan"], errors="coerce") == int(chosen_scan)]
+
+                keep_base = [
+                    "source_file",
+                    "scan",
+                    "precmz",
+                    "rt",
+                    "compendium",
+                    "section",
+                    "query_idx",
+                    "query_label",
+                ]
+                keep_extra = [c for c in ("NAME", "SPECTRUMID") if c in dfscan.columns]
                 keep = [c for c in keep_base + keep_extra if c in dfscan.columns]
-                if keep:
-                    dfscan = (dfscan[keep]
-                              .drop_duplicates()
-                              .sort_values(["source_file","compendium","section","query_idx"]))
-            st.markdown(html_table(dfscan, 300), unsafe_allow_html=True)
-            st.download_button(
-                "Download scan_hits.csv",
-                data=download_csv_bytes(dfscan),
-                file_name=f"{_safe_col(chosen_source)}_scan_{chosen_scan}_hits.csv"
-            )
-        else:
-            st.info("No scans available to display for this file.")
-else:
-    st.info("Upload inputs in the sidebar and press **Run MassQL Compendiums**.")
 
+                if not dfscan.empty and keep:
+                    dfscan_view = (
+                        dfscan[keep]
+                        .drop_duplicates()
+                        .sort_values(["source_file", "compendium", "section", "query_idx"])
+                    )
+                else:
+                    dfscan_view = dfscan
 
+                # --- Queries applied to this scan (exact executed text) ---
+                if not dfscan.empty and {"query_label", "query_text"}.issubset(dfscan.columns):
+                    q_opts = (
+                        dfscan[["query_label", "query_text"]]
+                        .dropna(subset=["query_label"])
+                        .drop_duplicates()
+                        .sort_values("query_label")
+                    )
+
+                    if not q_opts.empty:
+                        st.markdown("### Applied MassQL queries for this scan")
+                        chosen_q = st.selectbox(
+                            "Select query",
+                            q_opts["query_label"].tolist(),
+                            index=0,
+                            key=f"qdrop_{_safe_col(chosen_source)}_{chosen_scan}",
+                        )
+
+                        qtext_show = q_opts.loc[q_opts["query_label"] == chosen_q, "query_text"].iloc[0]
+                        st.code(qtext_show, language="text")
+
+                        st.download_button(
+                            "Download selected_query.txt",
+                            data=qtext_show.encode("utf-8"),
+                            file_name=f"{_safe_col(chosen_source)}_scan_{chosen_scan}_{_safe_col(chosen_q)}.txt",
+                            mime="text/plain",
+                            key=f"dlq_{_safe_col(chosen_source)}_{chosen_scan}",
+                        )
+
+                st.markdown(html_table(dfscan_view, 300), unsafe_allow_html=True)
+                st.download_button(
+                    "Download scan_hits.csv",
+                    data=download_csv_bytes(dfscan_view),
+                    file_name=f"{_safe_col(chosen_source)}_scan_{chosen_scan}_hits.csv",
+                )
