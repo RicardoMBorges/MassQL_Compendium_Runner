@@ -495,6 +495,270 @@ def _build_query_peak_matches(mz, qdf: pd.DataFrame):
 
     return matches
 
+# Built in compendia
+BUILTIN_UNIVERSAL_NEUTRAL_LOSS_COMPENDIUM = r"""
+# 1. General Neutral Losses — precursor based
+MassDif_NL_H2O	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 18.01056):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_2NH3	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 34.05310):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_2H2O	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 36.02110):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_3H2O	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 54.03170):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_CO	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 27.99490):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_CO2	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 43.98980):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Hydrogen	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 2.01570):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Methyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 15.02350):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Methylene	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 14.01570):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Methanol	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 32.02620):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+
+# 1. General Neutral Losses — fragment based
+MassDif_G_H2O	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 18.01056):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_2NH3	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 34.05310):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_2H2O	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 36.02110):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_3H2O	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 54.03170):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_CO	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 27.99490):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_CO2	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 43.98980):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Hydrogen	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 2.01570):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Methyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 15.02350):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Methylene	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 14.01570):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Methanol	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 32.02620):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+
+# 2. Small Organic Molecules — precursor based
+MassDif_NL_Acetaldehyde	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 44.02620):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Acetone	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 58.04190):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Acetonitrile	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 41.02600):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Acetyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 42.01056):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Acetylhexose	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 222.07390):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Alanine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 89.04770):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Ammonia	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 17.02655):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Benzene	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 78.04690):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Benzoyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 106.04190):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Butene	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 56.06260):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Caffeoyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 164.04740):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Choline	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 104.10700):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Cinnamoyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 130.04190):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Cysteine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 121.01970):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Ethanol	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 46.04190):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Ethanolamine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 61.05280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Ethylene	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 28.03130):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Formaldehyde	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 30.01060):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_FormicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 46.00550):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Feruloyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 194.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Galloyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 170.02150):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_GlutamicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 147.05320):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Glutaryl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 114.03170):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Glycerophosphate	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 168.01390):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Glycine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 75.03200):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_HCN	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 27.01090):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+
+# 2. Small Organic Molecules — fragment based
+MassDif_G_Acetaldehyde	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 44.02620):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Acetone	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 58.04190):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Acetonitrile	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 41.02600):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Acetyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 42.01056):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Acetylhexose	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 222.07390):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Alanine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 89.04770):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Ammonia	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 17.02655):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Arginine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 174.11170):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_AsparticAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 133.03750):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Benzene	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 78.04690):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Benzoyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 106.04190):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Butene	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 56.06260):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Caffeoyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 164.04740):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Choline	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 104.10700):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Cinnamoyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 130.04190):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Cysteine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 121.01970):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Ethanol	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 46.04190):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Ethanolamine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 61.05280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Ethylene	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 28.03130):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Formaldehyde	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 30.01060):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_FormicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 46.00550):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Feruloyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 194.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Galloyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 170.02150):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_GlutamicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 147.05320):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Glutaryl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 114.03170):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Glycerophosphate	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 168.01390):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Glycine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 75.03200):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_HCN	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 27.01090):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+
+# 3. Sugars — precursor based
+MassDif_NL_Glycerol	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 92.04730):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Hexose	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 162.05280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_GlucuronicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 194.04280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Pentose	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 150.05280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Ribose	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 150.05280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_UMP_sugar_phosphate	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 322.02080):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_HexuronicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 176.03210):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_RibosePhosphate	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 212.00860):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Inositol	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 180.06340):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Deoxyhexose	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 146.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Deoxypentose	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 134.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Deoxyribose	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 134.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_DeoxyribosePhosphate	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 196.01370):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Dihexose	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 342.11620):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_GlucuronicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 194.04280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_AMP_sugar_phosphate	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 196.99810):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_N-Hexose(HexN)	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 161.06881):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_N-HexoseAcid(HexNAc)	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 203.07937):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Desosamine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 159.08):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Mycaminose	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 175.08):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Daunosamine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 145.07):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Streptamine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 177.09):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Disaccharide(Hex–Hex)	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 324.10565):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Disaccharide(Hex + dHex)	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 308.11073):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Disaccharide(Hex + Pent)	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 294.09508):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Disaccharide(Hex + HexA)	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 338.08491):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Disaccharide(Pent + Pent)	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 264.08452):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Disaccharide(dHex + dHex)	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 292.11582):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_NL_Disaccharide(dHex + Pent)	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 278.10017):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+
+# 3. Sugars — fragment based
+MassDif_G_Glycerol	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 92.04730):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Hexose	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 162.05280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_GlucuronicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 194.04280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Pentose	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 150.05280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Ribose	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 150.05280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_UMP_sugar_phosphate	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 322.02080):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_HexuronicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 176.03210):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_RibosePhosphate	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 212.00860):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Inositol	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 180.06340):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Deoxyhexose	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 146.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Deoxypentose	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 134.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Deoxyribose	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 134.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_DeoxyribosePhosphate	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 196.01370):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Dihexose	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 342.11620):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_GlucuronicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 194.04280):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_AMP_sugar_phosphate	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 196.99810):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_N-Hexose(HexN)	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 161.06881):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_N-HexoseAcid(HexNAc)	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 203.07937):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Desosamine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 159.08):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Mycaminose	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 175.08):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Daunosamine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 145.07):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Streptamine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 177.09):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Disaccharide(Hex–Hex)	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 324.10565):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Disaccharide(Hex + dHex)	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 308.11073):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Disaccharide(Hex + Pent)	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 294.09508):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Disaccharide(Hex + HexA)	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 338.08491):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Disaccharide(Pent + Pent)	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 264.08452):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Disaccharide(dHex + dHex)	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 292.11582):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+MassDif_G_Disaccharide(dHex + Pent)	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 278.10017):TOLERANCEMZ=0.02:INTENSITYPERCENT=10
+
+# 4. Amino acids / related — precursor based
+MassDif_NL_Histidine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 155.06950):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Leucine_Isoleucine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 131.09460):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Lysine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 146.10550):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Malonyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 86.00040):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Methionine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 149.05100):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Methyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 15.02350):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Methyl_Water	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 32.02620):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Methylene	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 14.01570):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Phenyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 77.03910):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Phenylalanine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 165.07900):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Phosphocholine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 183.06600):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Phosphoethanolamine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 141.01920):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Phosphoglycerol	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 168.01390):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_PhosphoricAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 97.97690):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Proline	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 115.06330):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Propene	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 42.04690):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Pyrophosphate	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 177.94400):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Serine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 105.04260):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Sinapoyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 206.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Succinyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 100.01600):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Sulfate	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 96.95940):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_SO3	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 79.95670):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_SulfuricAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 97.96730):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Threonine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 119.05830):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Toluene	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 92.06260):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Tryptophan	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 204.08990):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Tyrosine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 181.07390):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Valine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 117.07900):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Vanilloyl	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 152.04740):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_Arginine	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 174.11170):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_AsparticAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 133.03750):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+
+# 4. Amino acids / related — fragment based
+MassDif_G_Histidine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 155.06950):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Leucine_Isoleucine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 131.09460):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Lysine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 146.10550):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Malonyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 86.00040):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Methionine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 149.05100):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Methyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 15.02350):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Methyl_Water	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 32.02620):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Methylene	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 14.01570):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Phenyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 77.03910):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Phenylalanine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 165.07900):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Phosphocholine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 183.06600):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Phosphoethanolamine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 141.01920):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Phosphoglycerol	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 168.01390):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_PhosphoricAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 97.97690):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Proline	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 115.06330):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Propene	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 42.04690):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Pyrophosphate	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 177.94400):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Serine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 105.04260):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Sinapoyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 206.05790):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Succinyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 100.01600):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Sulfate	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 96.95940):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_SO3	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 79.95670):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_SulfuricAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 97.96730):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Threonine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 119.05830):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Toluene	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 92.06260):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Tryptophan	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 204.08990):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Tyrosine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 181.07390):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Valine	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 117.07900):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_Vanilloyl	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 152.04740):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+
+# 5. Lipid cases — precursor based
+MassDif_NL_C12_0_LauricAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 200.17763):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C12_1_DodecenoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 198.16198):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C12_2_DodecadienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 196.14633):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C12_3_DodecatrienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 194.13068):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C14_0_MyristicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 228.20893):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C14_1_MyristoleicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 226.19328):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C14_2_MyristadienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 224.17763):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C14_3_MyristatrienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 222.16198):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C16_0_PalmiticAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 256.24023):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C16_1_PalmitoleicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 254.22458):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C16_2_HexadecadienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 252.20893):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C16_3_HexadecatrienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 250.19328):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C18_0_StearicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 284.27153):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C18_1_OleicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 282.25588):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C18_2_LinoleicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 280.24023):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_NL_C18_3_LinolenicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PREC=X AND MS2PROD=(X - 278.22458):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+
+# 5. Lipid cases — fragment based
+MassDif_G_C12_0_LauricAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 200.17763):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C12_1_DodecenoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 198.16198):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C12_2_DodecadienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 196.14633):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C12_3_DodecatrienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 194.13068):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C14_0_MyristicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 228.20893):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C14_1_MyristoleicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 226.19328):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C14_2_MyristadienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 224.17763):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C14_3_MyristatrienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 222.16198):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C16_0_PalmiticAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 256.24023):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C16_1_PalmitoleicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 254.22458):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C16_2_HexadecadienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 252.20893):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C16_3_HexadecatrienoicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 250.19328):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C18_0_StearicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 284.27153):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C18_1_OleicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 282.25588):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C18_2_LinoleicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 280.24023):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+MassDif_G_C18_3_LinolenicAcid	QUERY scaninfo(MS2DATA) WHERE MS2PROD=X AND MS2PROD=(X - 278.22458):TOLERANCEMZ=0.05:INTENSITYPERCENT=5
+"""
+
+def load_builtin_compendium_from_app():
+    """
+    Load the built-in compendium embedded directly in app.py.
+    Returns dict with comp_name, qitems, warnings.
+    """
+    raw = BUILTIN_UNIVERSAL_NEUTRAL_LOSS_COMPENDIUM
+    qitems, warns = parse_compendium_auto(
+        raw,
+        fallback_name="universal_neutral_loss_compendium"
+    )
+
+    return {
+        "comp_name": "universal_neutral_loss_compendium",
+        "qitems": qitems,
+        "warnings": warns,
+    }
+
 # ============================================================
 # Helper: convert MS1-only MGF → mzML for MassQL MS1 queries
 # ============================================================
@@ -1914,6 +2178,80 @@ def _extract_intensitypercent(qtext: str, default: float = 0.0) -> float:
     except Exception:
         return default
 
+def _parse_x_shift_query(qtext: str):
+    """
+    Supports patterns like:
+
+    1) MS2PROD=X AND MS2PROD=(X + 71.03711)
+    2) MS2PROD=X AND MS2PROD=(X - 18.01056)
+    3) MS2PROD=X AND MS2PROD=(X + aminoaciddelta(A))
+    4) MS2PREC=X AND MS2PROD=(X - 162.05282)
+
+    Returns dict or None.
+    """
+    q = str(qtext)
+
+    tol = _extract_global_tolerancemz(q, default=0.02)
+    min_int_pct = _extract_intensitypercent(q, default=0.0)
+
+    has_prod_x = bool(re.search(r"MS2PROD\s*=\s*X\b", q, flags=re.IGNORECASE))
+    has_prec_x = bool(re.search(r"MS2PREC\s*=\s*X\b", q, flags=re.IGNORECASE))
+
+    # Look for shifted PROD relative to X
+    m = re.search(
+        r"MS2PROD\s*=\s*\(\s*X\s*([+-])\s*(.*?)\s*\)",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+
+    sign = m.group(1)
+    rhs = m.group(2).strip()
+
+    delta = None
+    residue = ""
+
+    # Case 1: aminoaciddelta(A)
+    maa = re.fullmatch(r"aminoaciddelta\(\s*([A-Za-z]+)\s*\)", rhs, flags=re.IGNORECASE)
+    if maa:
+        residue = maa.group(1).strip()
+        if residue not in AA_DELTA:
+            return None
+        delta = float(AA_DELTA[residue])
+
+    # Case 2: numeric shift
+    else:
+        try:
+            delta = float(rhs)
+        except Exception:
+            return None
+
+    if sign == "-":
+        signed_delta = -delta
+    else:
+        signed_delta = delta
+
+    if has_prod_x:
+        mode = "prod_x_shift"
+    elif has_prec_x:
+        mode = "prec_x_shift"
+    else:
+        return None
+
+    return {
+        "mode": mode,
+        "residue": residue,
+        "delta": float(delta),
+        "signed_delta": float(signed_delta),
+        "sign": sign,
+        "tol": float(tol),
+        "min_int_pct": float(min_int_pct),
+        "query_text": q,
+    }
+
+
+##############
 def _parse_x_plus_delta_query(qtext: str):
     q = str(qtext)
 
@@ -1970,44 +2308,83 @@ def _parse_fixed_prod_query(qtext: str):
 
     return vals if vals else None
 
-def diagnose_delta_pairs_for_scan(mz: np.ndarray, y_rel: np.ndarray, qtext: str):
-    spec = _parse_x_plus_delta_query(qtext)
+def diagnose_x_shift_for_scan(mz: np.ndarray, y_rel: np.ndarray, precmz: float | None, qtext: str):
+    spec = _parse_x_shift_query(qtext)
     if spec is None:
         return []
 
-    delta = spec["delta"]
     tol = spec["tol"]
     min_int_pct = spec["min_int_pct"]
+    delta = spec["delta"]
+    signed_delta = spec["signed_delta"]
     residue = spec["residue"]
+    mode = spec["mode"]
+    sign = spec["sign"]
 
     hits = []
     n = len(mz)
 
-    for i in range(n):
-        if y_rel[i] < min_int_pct:
-            continue
+    # ------------------------------------------
+    # Case 1: MS2PROD=X and MS2PROD=(X +/- delta)
+    # ------------------------------------------
+    if mode == "prod_x_shift":
+        for i in range(n):
+            if y_rel[i] < min_int_pct:
+                continue
 
-        target = float(mz[i]) + delta
+            target = float(mz[i]) + signed_delta
+            idxs = np.where(np.abs(mz - target) <= tol)[0]
+
+            for j in idxs:
+                if i == j:
+                    continue
+                if y_rel[j] < min_int_pct:
+                    continue
+
+                observed_delta = float(mz[j]) - float(mz[i])
+
+                hits.append({
+                    "mode": mode,
+                    "residue": residue,
+                    "sign": sign,
+                    "x_mz": float(mz[i]),
+                    "y_mz": float(mz[j]),
+                    "expected_delta": float(abs(delta)),
+                    "observed_delta": float(abs(observed_delta)),
+                    "signed_observed_delta": float(observed_delta),
+                    "error_da": float(abs(observed_delta) - abs(delta)),
+                    "intensity_x_pct": float(y_rel[i]),
+                    "intensity_y_pct": float(y_rel[j]),
+                    "tol": float(tol),
+                })
+
+    # ------------------------------------------
+    # Case 2: MS2PREC=X and MS2PROD=(X - delta) or (X + delta)
+    # ------------------------------------------
+    elif mode == "prec_x_shift":
+        if precmz is None or (isinstance(precmz, float) and np.isnan(precmz)):
+            return []
+
+        target = float(precmz) + signed_delta
         idxs = np.where(np.abs(mz - target) <= tol)[0]
 
         for j in idxs:
-            if i == j:
-                continue
             if y_rel[j] < min_int_pct:
                 continue
 
-            obs_delta = float(mz[j]) - float(mz[i])
-            err = obs_delta - delta
+            observed_delta = float(mz[j]) - float(precmz)
 
             hits.append({
-                "mode": "x_plus_aminoaciddelta",
+                "mode": mode,
                 "residue": residue,
-                "x_mz": float(mz[i]),
+                "sign": sign,
+                "x_mz": float(precmz),
                 "y_mz": float(mz[j]),
-                "expected_delta": float(delta),
-                "observed_delta": float(obs_delta),
-                "error_da": float(err),
-                "intensity_x_pct": float(y_rel[i]),
+                "expected_delta": float(abs(delta)),
+                "observed_delta": float(abs(observed_delta)),
+                "signed_observed_delta": float(observed_delta),
+                "error_da": float(abs(observed_delta) - abs(delta)),
+                "intensity_x_pct": 100.0,
                 "intensity_y_pct": float(y_rel[j]),
                 "tol": float(tol),
             })
@@ -2156,7 +2533,7 @@ def _plot_ms2_diagnostic_html(
         )
 
     # -------------------------------------------------
-    # MODE 2: x_plus_aminoaciddelta
+    # MODE 2: generic X-shift
     # -------------------------------------------------
     else:
         x_mz = float(diag_row["x_mz"])
@@ -2165,13 +2542,16 @@ def _plot_ms2_diagnostic_html(
         observed_delta = float(diag_row["observed_delta"])
         error_da = float(diag_row["error_da"])
         residue = str(diag_row.get("residue", ""))
+        sign = str(diag_row.get("sign", "+"))
+        mode_name = str(diag_row.get("mode", ""))
 
-        idx_x = int(np.argmin(np.abs(mz - x_mz)))
+        idx_x = int(np.argmin(np.abs(mz - y_mz))) if mode_name == "prec_x_shift" else int(np.argmin(np.abs(mz - x_mz)))
         idx_y = int(np.argmin(np.abs(mz - y_mz)))
 
-        peak_x = float(mz[idx_x])
+        peak_x = x_mz if mode_name == "prec_x_shift" else float(mz[idx_x])
         peak_y = float(mz[idx_y])
-        int_x = float(y[idx_x])
+
+        int_x = ymax * 0.85 if mode_name == "prec_x_shift" else float(y[idx_x])
         int_y = float(y[idx_y])
 
         rect_h_x = max(int_x * 1.05, rectangle_height_frac * ymax)
@@ -2201,10 +2581,13 @@ def _plot_ms2_diagnostic_html(
         ax.scatter([peak_x], [int_x], s=80, marker="s", zorder=8)
         ax.scatter([peak_y], [int_y], s=80, marker="s", zorder=8)
 
+        x_label = "PREC" if mode_name == "prec_x_shift" else "X"
+        y_label = f"X{sign}Δ"
+
         ax.text(
             peak_x,
             rect_h_x + 0.03 * ymax,
-            f"X\n{peak_x:.4f}",
+            f"{x_label}\n{peak_x:.4f}",
             ha="center",
             va="bottom",
             fontsize=8,
@@ -2212,17 +2595,20 @@ def _plot_ms2_diagnostic_html(
         ax.text(
             peak_y,
             rect_h_y + 0.03 * ymax,
-            f"X+Δ\n{peak_y:.4f}",
+            f"{y_label}\n{peak_y:.4f}",
             ha="center",
             va="bottom",
             fontsize=8,
         )
 
-        y_line = max(rect_h_x, rect_h_y) +  ymax * 0.08
+        y_line = max(rect_h_x, rect_h_y) + ymax * 0.08
         ax.plot([peak_x, peak_y], [y_line, y_line], linewidth=1.8, zorder=6, color="red")
 
+        delta_name = residue if residue else f"{sign}{expected_delta:.5f}"
+
         label = (
-            f"{residue} Δ expected={expected_delta:.5f}\n"
+            f"{delta_name}\n"
+            f"expected={expected_delta:.5f}\n"
             f"observed={observed_delta:.5f} | error={error_da:+.5f}"
         )
 
@@ -2239,13 +2625,12 @@ def _plot_ms2_diagnostic_html(
         )
 
         dbg = (
-            f"mode=x_plus_aminoaciddelta\n"
+            f"mode={mode_name}\n"
             f"x_mz={peak_x:.5f}\n"
             f"y_mz={peak_y:.5f}\n"
             f"expected_delta={expected_delta:.5f}\n"
             f"observed_delta={observed_delta:.5f}"
         )
-
     ax.text(
         0.01,
         0.99,
@@ -2330,11 +2715,11 @@ def run_diagnostics_from_matches(combined_df: pd.DataFrame, ms_indexes: dict, di
         # -------------------------------------------------
         # Parse supported diagnostic modes
         # -------------------------------------------------
-        parsed_delta = _parse_x_plus_delta_query(qtext)
-        fixed_targets = None if parsed_delta is not None else _parse_fixed_prod_query(qtext)
+        parsed_shift = _parse_x_shift_query(qtext)
+        fixed_targets = None if parsed_shift is not None else _parse_fixed_prod_query(qtext)
 
-        if parsed_delta is not None:
-            diagnostic_mode = parsed_delta["mode"]
+        if parsed_shift is not None:
+            diagnostic_mode = parsed_shift["mode"]
             supported = True
         elif fixed_targets is not None:
             diagnostic_mode = "fixed_prod"
@@ -2356,10 +2741,18 @@ def run_diagnostics_from_matches(combined_df: pd.DataFrame, ms_indexes: dict, di
         })
 
         # -------------------------------------------------
-        # Mode 1: X + aminoaciddelta(...)
+        # Mode 1: generic X-shift
         # -------------------------------------------------
-        if parsed_delta is not None:
-            pairs = diagnose_delta_pairs_for_scan(mz, y_rel, qtext)
+        if parsed_shift is not None:
+            rec_params = rec.get("params", {}) or {}
+            pep = rec_params.get("pepmass")
+            precmz = pep[0] if isinstance(pep, (list, tuple, np.ndarray)) else pep
+            try:
+                precmz = float(precmz)
+            except Exception:
+                precmz = np.nan
+
+            pairs = diagnose_x_shift_for_scan(mz, y_rel, precmz, qtext)
 
             for p in pairs:
                 pair_rows.append({
@@ -2384,12 +2777,10 @@ def run_diagnostics_from_matches(combined_df: pd.DataFrame, ms_indexes: dict, di
                 if len(idxs) == 0:
                     continue
 
-                # keep only peaks above intensity threshold
                 idxs = [idx for idx in idxs if y_rel[idx] >= min_int_pct]
                 if len(idxs) == 0:
                     continue
 
-                # choose the closest peak
                 best = min(idxs, key=lambda idx: abs(float(mz[idx]) - float(target)))
 
                 pair_rows.append({
@@ -2408,6 +2799,7 @@ def run_diagnostics_from_matches(combined_df: pd.DataFrame, ms_indexes: dict, di
                 })
 
     return pd.DataFrame(diag_rows), pd.DataFrame(pair_rows)
+
     
 # ============================================================
 # Streamlit UI
@@ -2419,6 +2811,7 @@ st.caption(
 )
 
 with st.sidebar:
+
     st.header("1) Inputs")
 
     up_ms_files = st.file_uploader(
@@ -2428,6 +2821,18 @@ with st.sidebar:
         help="Upload one or more MS files. For MGF, scans are forced to 1..N.",
     )
 
+    st.markdown("---")
+
+    st.header("Built-in compendium")
+
+    use_builtin_general = st.checkbox(
+        "Load built-in universal neutral loss compendium",
+        value=False,
+        help="Use the compendium bundled with the app repository.",
+    )
+
+    st.markdown("OR")
+
     up_comps = st.file_uploader(
         "Compendium files (txt/tsv) — supports QUERY-block and name<TAB>QUERY formats",
         type=["txt", "tsv", "tab", "csv"],
@@ -2435,8 +2840,10 @@ with st.sidebar:
         help="Either: (A) multi-line blocks starting with QUERY, or (B) TSV lines: name<TAB>QUERY ...",
     )
 
-    preview_compendia = st.checkbox("Preview parsed compendia on upload", value=False)
-
+    preview_compendia = st.checkbox(
+        "Preview parsed compendia on upload",
+        value=False
+    )
 
     convert_ms1_mgf_flag = st.checkbox(
         "Force-convert uploaded MGF into simple mzML with all spectra written as MS1",
@@ -2445,6 +2852,7 @@ with st.sidebar:
     )
 
     st.header("2) Qualifier overrides (applied to all)")
+
     colA, colB, colC = st.columns(3)
     with colA:
         tol_mz = st.text_input("TOLERANCEMZ override (blank = keep query value)", value="")
@@ -2465,7 +2873,7 @@ with st.sidebar:
 
     run_btn = st.button("Run MassQL Compendiums", type="primary")
 
-st.sidebar.markdown("""---""")
+    st.sidebar.markdown("""---""")
 
 st.sidebar.markdown("""
 ### Citation
@@ -2547,8 +2955,12 @@ def _build_qualifier_overrides(global_inputs: dict, per_comp_text: str) -> dict 
 
 
 if run_btn:
-    if (not up_ms_files) or (not up_comps):
-        st.error("Please upload at least one MS file and one compendium file.")
+    if not up_ms_files:
+        st.error("Please upload at least one MS file.")
+        st.stop()
+
+    if (not up_comps) and (not use_builtin_general):
+        st.error("Please upload at least one compendium file or enable the built-in compendium.")
         st.stop()
 
     # -----------------------------
@@ -2595,7 +3007,7 @@ if run_btn:
     comp_paths: list[str] = []
     parsed_compendia: list[dict] = []  # [{"comp_name": str, "qitems": [...], "warnings": [...]}]
 
-    for f in up_comps:
+    for f in up_comps or []:
         comp_p, comp_disp = _persist_upload(f)
         if comp_p is None:
             continue
@@ -2613,6 +3025,13 @@ if run_btn:
                 "warnings": warns,
             }
         )
+
+    # -----------------------------
+    # Add built-in compendium
+    # -----------------------------
+    if use_builtin_general:
+        built_pack = load_builtin_compendium_from_app()
+        parsed_compendia.append(built_pack)
 
     # -----------------------------
     # Optional preview
@@ -2671,7 +3090,6 @@ if run_btn:
     state.display_to_view_path = display_to_view_path
     state.last_comp_paths = comp_paths
 
-    # add for diagnostics_check
     diagnostics_df, diagnostics_pairs = run_diagnostics_from_matches(
         combined_unique,
         ms_indexes,
